@@ -3,7 +3,7 @@ import {
   CreditCard, Calendar, DollarSign, Settings, AlertCircle,
   CheckCircle, Clock, RefreshCw, Download, Eye, MoreVertical,
   Plus, Trash2, Edit3, Shield, Crown, Zap, TrendingUp,
-  Receipt, FileText, Bell, X, Loader2
+  Receipt, FileText, Bell, X, Loader2, Star, Check
 } from 'lucide-react';
 import { SubscriptionService } from '../services/subscriptionService';
 import { loadStripe } from '@stripe/stripe-js';
@@ -42,6 +42,8 @@ const BillingPage: React.FC = () => {
   const [error, setError] = useState('');
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [showAddPaymentModal, setShowAddPaymentModal] = useState(false);
+  const [cancelReason, setCancelReason] = useState('');
+  const [addingPaymentMethod, setAddingPaymentMethod] = useState(false);
   
   const { user } = useAuth();
 
@@ -71,11 +73,10 @@ const BillingPage: React.FC = () => {
       console.log('💳 Loaded subscription data:', subscriptionData);
       setSubscription(subscriptionData);
 
-      // Load real payment methods and invoices if we have Stripe customer ID
+      // Load payment methods and invoices
       if (subscriptionData?.subscription?.stripe_customer_id) {
         try {
-          // In a real implementation, you would call your backend to get Stripe data.
-          // For now, we'll show basic data based on subscription.
+          // Mock payment methods for demo - in production, call your backend
           setPaymentMethods([
             {
               id: 'pm_default',
@@ -154,31 +155,129 @@ const BillingPage: React.FC = () => {
   }, [user]);
 
   const handleCancelSubscription = async () => {
-    if (!subscription?.subscription?.stripe_subscription_id) return;
+    if (!subscription?.subscription?.id) return;
 
     try {
       setActionLoading('cancel');
       
-      // Call your backend to cancel the Stripe subscription
-      const response = await fetch('/api/cancel-subscription', {
+      // Update subscription status to cancelled in our database
+      await SubscriptionService.updateSubscriptionStatus(subscription.subscription.id, 'cancelled');
+      
+      // Refresh subscription data
+      await loadBillingData();
+      setShowCancelModal(false);
+      setCancelReason('');
+      
+      // Show success message
+      alert('Subscription cancelled successfully. You will retain access until the end of your billing period.');
+      
+    } catch (err: any) {
+      setError(err.message || 'Failed to cancel subscription');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleAddPaymentMethod = async () => {
+    try {
+      setAddingPaymentMethod(true);
+      setActionLoading('add-payment');
+      
+      if (!subscription?.subscription?.stripe_customer_id) {
+        throw new Error('No Stripe customer found');
+      }
+
+      // Create a setup intent for adding payment method
+      const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/create-setup-intent`, {
         method: 'POST',
         headers: {
+          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${user?.access_token}`
         },
         body: JSON.stringify({
-          subscriptionId: subscription.subscription.stripe_subscription_id
+          customerId: subscription.subscription.stripe_customer_id
         })
       });
 
       if (!response.ok) {
-        throw new Error('Failed to cancel subscription');
+        throw new Error('Failed to create setup intent');
       }
 
+      const { setupIntent } = await response.json();
+      
+      // In a real implementation, you would use Stripe Elements here
+      // For now, we'll simulate adding a payment method
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Refresh payment methods
       await loadBillingData();
-      setShowCancelModal(false);
+      setShowAddPaymentModal(false);
+      
     } catch (err: any) {
-      setError(err.message || 'Failed to cancel subscription');
+      setError(err.message || 'Failed to add payment method');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleRemovePaymentMethod = async (paymentMethodId: string) => {
+    if (!confirm('Are you sure you want to remove this payment method?')) return;
+
+    try {
+      setActionLoading(`remove-${paymentMethodId}`);
+      
+      // Call backend to detach payment method
+      const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/detach-payment-method`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          paymentMethodId
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to remove payment method');
+      }
+
+      // Refresh payment methods
+      await loadBillingData();
+      
+    } catch (err: any) {
+      setError(err.message || 'Failed to remove payment method');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleSetDefaultPaymentMethod = async (paymentMethodId: string) => {
+    try {
+      setActionLoading(`default-${paymentMethodId}`);
+      
+      // Call backend to set default payment method
+      const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/set-default-payment-method`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          paymentMethodId,
+          customerId: subscription?.subscription?.stripe_customer_id
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to set default payment method');
+      }
+
+      // Refresh payment methods
+      await loadBillingData();
+      
+    } catch (err: any) {
+      setError(err.message || 'Failed to set default payment method');
     } finally {
       setActionLoading(null);
     }
@@ -220,20 +319,89 @@ const BillingPage: React.FC = () => {
     }
   };
 
+  const getNextBillingInfo = () => {
+    if (!subscription?.subscription) return { text: 'N/A', isOneTime: false };
+    
+    const plan = subscription.subscription.plan_type;
+    const endDate = subscription.subscription.current_period_end;
+    const startDate = subscription.subscription.current_period_start;
+    
+    switch (plan) {
+      case 'annual':
+        return { 
+          text: 'One-time payment (1 year)', 
+          isOneTime: true,
+          expires: endDate ? new Date(endDate).toLocaleDateString() : 'N/A',
+          isExpired: endDate ? new Date(endDate) < new Date() : false
+        };
+      case 'semiannual':
+        return { 
+          text: 'One-time payment (6 months)', 
+          isOneTime: true,
+          expires: endDate ? new Date(endDate).toLocaleDateString() : 'N/A',
+          isExpired: endDate ? new Date(endDate) < new Date() : false
+        };
+      case 'monthly':
+        return { 
+          text: endDate ? new Date(endDate).toLocaleDateString() : 'N/A', 
+          isOneTime: false,
+          isExpired: endDate ? new Date(endDate) < new Date() : false
+        };
+      case 'trial':
+        return { 
+          text: endDate ? new Date(endDate).toLocaleDateString() : 'N/A', 
+          isOneTime: false,
+          isExpired: endDate ? new Date(endDate) < new Date() : false
+        };
+      default:
+        return { text: 'N/A', isOneTime: false, isExpired: false };
+    }
+  };
+
+  const getBillingPeriodText = () => {
+    if (!subscription?.subscription) return 'N/A';
+    
+    const plan = subscription.subscription.plan_type;
+    const startDate = subscription.subscription.current_period_start;
+    const endDate = subscription.subscription.current_period_end;
+    
+    if (!startDate || !endDate) return 'N/A';
+    
+    const start = new Date(startDate).toLocaleDateString();
+    const end = new Date(endDate).toLocaleDateString();
+    
+    // Calculate actual duration
+    const startTime = new Date(startDate).getTime();
+    const endTime = new Date(endDate).getTime();
+    const durationDays = Math.ceil((endTime - startTime) / (1000 * 60 * 60 * 24));
+    
+    let periodLabel = '';
+    if (durationDays >= 350) {
+      periodLabel = '1 year';
+    } else if (durationDays >= 150) {
+      periodLabel = '6 months';
+    } else if (durationDays >= 25) {
+      periodLabel = '1 month';
+    } else {
+      periodLabel = 'trial';
+    }
+    
+    return `${start} - ${end} (${periodLabel})`;
+  };
+
   if (loading) {
-    // keep a single loading return (skeleton)
     return (
-      <div className="space-y-6">
-        <div className="animate-pulse">
-          <div className="h-8 bg-gray-200 rounded w-64 mb-6"></div>
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div className="h-64 bg-gray-200 rounded-2xl"></div>
-            <div className="h-64 bg-gray-200 rounded-2xl"></div>
-          </div>
+      <div className="animate-pulse space-y-6">
+        <div className="h-8 bg-gray-200 rounded w-64 mb-6"></div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="h-64 bg-gray-200 rounded-2xl"></div>
+          <div className="h-64 bg-gray-200 rounded-2xl"></div>
         </div>
       </div>
     );
   }
+
+  const nextBillingInfo = getNextBillingInfo();
 
   return (
     <div className="space-y-6">
@@ -288,12 +456,18 @@ const BillingPage: React.FC = () => {
               </div>
 
               <div className="flex items-center justify-between">
-                <span className="text-gray-600">Next Billing</span>
+                <span className="text-gray-600">
+                  {nextBillingInfo.isOneTime ? 'Plan Expires' : 'Next Billing'}
+                </span>
                 <span className="font-semibold text-gray-900">
-                  {subscription.subscription.current_period_end 
-                    ? new Date(subscription.subscription.current_period_end).toLocaleDateString()
-                    : 'N/A'
-                  }
+                  {nextBillingInfo.isOneTime ? nextBillingInfo.expires : nextBillingInfo.text}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <span className="text-gray-600">Billing Period</span>
+                <span className="font-semibold text-gray-900 text-sm">
+                  {getBillingPeriodText()}
                 </span>
               </div>
 
@@ -302,11 +476,16 @@ const BillingPage: React.FC = () => {
                   <span className="text-gray-600">Days Remaining</span>
                   <span className={`font-semibold ${subscription.daysRemaining <= 7 ? 'text-red-600' : 'text-gray-900'}`}>
                     {subscription.daysRemaining} days
+                    {(subscription.subscription.plan_type === 'annual' || subscription.subscription.plan_type === 'semiannual') && (
+                      <span className="text-xs text-gray-500 ml-1">
+                        ({subscription.subscription.plan_type} plan)
+                      </span>
+                    )}
                   </span>
                 </div>
               )}
 
-              {subscription.subscription.plan_type !== 'trial' && (
+              {subscription.subscription.plan_type !== 'trial' && subscription.subscription.status !== 'cancelled' && (
                 <div className="pt-4 border-t border-gray-200">
                   <button
                     onClick={() => setShowCancelModal(true)}
@@ -314,6 +493,16 @@ const BillingPage: React.FC = () => {
                   >
                     Cancel Subscription
                   </button>
+                </div>
+              )}
+
+              {subscription.subscription.status === 'cancelled' && (
+                <div className="pt-4 border-t border-gray-200">
+                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                    <p className="text-yellow-800 text-sm font-medium">
+                      Subscription cancelled. Access ends on {nextBillingInfo.expires || 'N/A'}
+                    </p>
+                  </div>
                 </div>
               )}
             </div>
@@ -324,7 +513,10 @@ const BillingPage: React.FC = () => {
               <p className="text-gray-600 mb-6">
                 You're currently on the free trial. Upgrade to unlock all features.
               </p>
-              <button className="bg-gradient-to-r from-[#E6A85C] via-[#E85A9B] to-[#D946EF] text-white px-6 py-3 rounded-xl hover:shadow-lg transition-all duration-200">
+              <button 
+                onClick={() => window.location.href = '/upgrade'}
+                className="bg-gradient-to-r from-[#E6A85C] via-[#E85A9B] to-[#D946EF] text-white px-6 py-3 rounded-xl hover:shadow-lg transition-all duration-200"
+              >
                 Choose a Plan
               </button>
             </div>
@@ -380,13 +572,34 @@ const BillingPage: React.FC = () => {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    {method.is_default && (
-                      <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full font-medium">
+                    {method.is_default ? (
+                      <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full font-medium flex items-center gap-1">
+                        <Check className="h-3 w-3" />
                         Default
                       </span>
+                    ) : (
+                      <button
+                        onClick={() => handleSetDefaultPaymentMethod(method.id)}
+                        disabled={actionLoading === `default-${method.id}`}
+                        className="px-2 py-1 bg-gray-100 text-gray-600 text-xs rounded-full font-medium hover:bg-gray-200 transition-colors disabled:opacity-50"
+                      >
+                        {actionLoading === `default-${method.id}` ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          'Set Default'
+                        )}
+                      </button>
                     )}
-                    <button className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition-colors">
-                      <MoreVertical className="h-4 w-4" />
+                    <button 
+                      onClick={() => handleRemovePaymentMethod(method.id)}
+                      disabled={actionLoading === `remove-${method.id}`}
+                      className="p-2 text-red-400 hover:text-red-600 rounded-lg hover:bg-red-50 transition-colors disabled:opacity-50"
+                    >
+                      {actionLoading === `remove-${method.id}` ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-4 w-4" />
+                      )}
                     </button>
                   </div>
                 </div>
@@ -468,59 +681,70 @@ const BillingPage: React.FC = () => {
             <TrendingUp className="h-6 w-6 text-yellow-600" />
           </div>
           <div>
-            <h3 className="text-lg font-semibold text-gray-900">Usage & Limits</h3>
-            <p className="text-sm text-gray-600">Current usage against your plan limits</p>
+            <h3 className="text-lg font-semibold text-gray-900">Plan Features</h3>
+            <p className="text-sm text-gray-600">Available features in your current plan</p>
           </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="space-y-4">
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm text-gray-600">Customers</span>
-                <span className="text-sm font-medium text-gray-900">
-                  {subscription?.features?.maxCustomers === -1 ? 'Unlimited' : `0 / ${subscription?.features?.maxCustomers || 0}`}
-                </span>
-              </div>
-              <div className="w-full bg-gray-200 rounded-full h-2">
-                <div className="bg-gradient-to-r from-[#E6A85C] to-[#E85A9B] h-2 rounded-full" style={{ width: '25%' }} />
-              </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-600">Customers</span>
+              <span className="text-sm font-medium text-gray-900">
+                {subscription?.features?.maxCustomers === -1 ? 'Unlimited' : `${subscription?.features?.maxCustomers || 100} max`}
+              </span>
             </div>
 
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm text-gray-600">Branches</span>
-                <span className="text-sm font-medium text-gray-900">
-                  {subscription?.features?.maxBranches === -1 ? 'Unlimited' : `0 / ${subscription?.features?.maxBranches || 0}`}
-                </span>
-              </div>
-              <div className="w-full bg-gray-200 rounded-full h-2">
-                <div className="bg-gradient-to-r from-[#E6A85C] to-[#E85A9B] h-2 rounded-full" style={{ width: '10%' }} />
-              </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-600">Branches</span>
+              <span className="text-sm font-medium text-gray-900">
+                {subscription?.features?.maxBranches === -1 ? 'Unlimited' : `${subscription?.features?.maxBranches || 1} max`}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-600">Multi-Branch Support</span>
+              <span className={`text-sm font-medium ${subscription?.features?.maxBranches > 1 ? 'text-green-600' : 'text-gray-400'}`}>
+                {subscription?.features?.maxBranches > 1 ? 'Included' : 'Not Available'}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <span className="text-gray-600">Custom Branding</span>
+              <span className={`font-semibold ${subscription?.features?.customBranding ? 'text-green-600' : 'text-gray-400'}`}>
+                {subscription?.features?.customBranding ? 'Included' : 'Not Available'}
+              </span>
             </div>
           </div>
 
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <CheckCircle className="h-4 w-4 text-green-600" />
-              <span className="text-sm text-gray-700">Advanced Analytics</span>
-              {!subscription?.features?.advancedAnalytics && (
-                <span className="px-2 py-1 bg-gray-100 text-gray-600 text-xs rounded-full">Upgrade Required</span>
-              )}
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-600">Advanced Analytics</span>
+              <span className={`text-sm font-medium ${subscription?.features?.advancedAnalytics ? 'text-green-600' : 'text-gray-400'}`}>
+                {subscription?.features?.advancedAnalytics ? 'Included' : 'Not Available'}
+              </span>
             </div>
-            <div className="flex items-center gap-2">
-              <CheckCircle className="h-4 w-4 text-green-600" />
-              <span className="text-sm text-gray-700">Priority Support</span>
-              {!subscription?.features?.prioritySupport && (
-                <span className="px-2 py-1 bg-gray-100 text-gray-600 text-xs rounded-full">Upgrade Required</span>
-              )}
+
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-600">Priority Support</span>
+              <span className={`text-sm font-medium ${subscription?.features?.prioritySupport ? 'text-green-600' : 'text-gray-400'}`}>
+                {subscription?.features?.prioritySupport ? 'Included' : 'Not Available'}
+              </span>
             </div>
-            <div className="flex items-center gap-2">
-              <CheckCircle className="h-4 w-4 text-green-600" />
-              <span className="text-sm text-gray-700">API Access</span>
-              {!subscription?.features?.apiAccess && (
-                <span className="px-2 py-1 bg-gray-100 text-gray-600 text-xs rounded-full">Upgrade Required</span>
-              )}
+
+
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-600">API Access</span>
+              <span className={`text-sm font-medium ${subscription?.features?.apiAccess ? 'text-green-600' : 'text-gray-400'}`}>
+                {subscription?.features?.apiAccess ? 'Included' : 'Not Available'}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <span className="text-gray-600">White-Label Solution</span>
+              <span className={`font-semibold ${subscription?.subscription?.plan_type === 'annual' ? 'text-green-600' : 'text-gray-400'}`}>
+                {subscription?.subscription?.plan_type === 'annual' ? 'Included' : 'Not Available'}
+              </span>
             </div>
           </div>
         </div>
@@ -573,16 +797,30 @@ const BillingPage: React.FC = () => {
                       Cancelling your subscription will:
                     </p>
                     <ul className="text-red-700 text-sm mt-2 space-y-1 list-disc list-inside">
-                      <li>End access to premium features</li>
+                      <li>End access to premium features after your billing period</li>
                       <li>Stop automatic billing</li>
                       <li>Limit customer capacity to 100</li>
+                      <li>Remove advanced analytics and reporting</li>
                     </ul>
                   </div>
                 </div>
               </div>
 
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Reason for cancellation (optional)
+                </label>
+                <textarea
+                  value={cancelReason}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
+                  placeholder="Help us improve by telling us why you're cancelling..."
+                  rows={3}
+                />
+              </div>
+
               <p className="text-gray-600 text-sm">
-                Your subscription will remain active until the end of your current billing period.
+                Your subscription will remain active until {nextBillingInfo.expires || 'the end of your billing period'}.
               </p>
             </div>
 
@@ -608,8 +846,70 @@ const BillingPage: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Add Payment Method Modal */}
+      {showAddPaymentModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-lg font-bold text-gray-900">Add Payment Method</h3>
+              <button
+                onClick={() => setShowAddPaymentModal(false)}
+                className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                <div className="flex items-center gap-3">
+                  <Shield className="h-5 w-5 text-blue-600" />
+                  <div>
+                    <p className="text-sm font-medium text-blue-900">Secure Payment</p>
+                    <p className="text-xs text-blue-700">
+                      Your payment information is secured by Stripe
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="text-center py-8">
+                <CreditCard className="h-12 w-12 text-gray-300 mx-auto mb-4" />
+                <p className="text-gray-500 mb-4">Payment method setup would appear here</p>
+                <p className="text-sm text-gray-400">
+                  In production, this would integrate with Stripe Elements
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => setShowAddPaymentModal(false)}
+                className="flex-1 py-3 px-4 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleAddPaymentMethod}
+                disabled={actionLoading === 'add-payment'}
+                className="flex-1 py-3 px-4 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {actionLoading === 'add-payment' ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <>
+                    <Plus className="h-4 w-4" />
+                    Add Payment Method
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
-};
+}; 
 
 export default BillingPage;
