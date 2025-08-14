@@ -1,926 +1,598 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  CreditCard, Calendar, DollarSign, Settings, AlertCircle,
-  CheckCircle, Clock, RefreshCw, Download, Eye, MoreVertical,
-  Plus, Trash2, Edit3, Shield, Crown, Zap, TrendingUp,
-  Receipt, FileText, Bell, X, Loader2, Star, Check
-} from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { CustomerService } from '../services/customerService';
+import { RewardService } from '../services/rewardService';
 import { SubscriptionService } from '../services/subscriptionService';
-import { loadStripe } from '@stripe/stripe-js';
+import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 
-const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY || '');
+// Cache for dashboard data with timestamps
+const dataCache = new Map<string, { data: any; timestamp: number }>();
+const CACHE_DURATION = 15 * 60 * 1000; // 15 minutes
+const lastFetchTimes = new Map<string, number>();
 
-interface PaymentMethod {
-  id: string;
-  type: string;
-  card?: {
-    brand: string;
-    last4: string;
-    exp_month: number;
-    exp_year: number;
-  };
-  is_default: boolean;
+interface DashboardStats {
+  name: string;
+  value: string;
+  change: string;
+  trend: 'up' | 'down';
+  description: string;
 }
 
-interface Invoice {
+interface RecentActivity {
   id: string;
-  amount: number;
-  status: string;
-  created: number;
-  invoice_pdf?: string;
-  period_start: number;
-  period_end: number;
+  customer: string;
+  avatar: string;
+  action: string;
+  points: string;
+  time: string;
+  tier: 'bronze' | 'silver' | 'gold';
+  reward?: string;
 }
 
-const BillingPage: React.FC = () => {
+interface Notification {
+  id: string;
+  type: 'success' | 'warning' | 'info';
+  title: string;
+  message: string;
+  time: string;
+}
+
+interface CustomerGrowthData {
+  date: string;
+  newCustomers: number;
+  returningCustomers: number;
+  totalCustomers: number;
+}
+
+interface RewardDistributionData {
+  name: string;
+  value: number;
+  color: string;
+  percentage: number;
+}
+
+interface LoyaltyROIData {
+  totalRevenue: number;
+  loyaltyRevenue: number;
+  rewardCosts: number;
+  netProfit: number;
+  roi: number;
+  averageOrderValue: number;
+  loyaltyAOV: number;
+  retentionRate: number;
+}
+
+interface MonthlyTrendData {
+  month: string;
+  revenue: number;
+  loyaltyRevenue: number;
+  rewardCosts: number;
+  netProfit: number;
+}
+
+export const useDashboardData = (timeRange: string = '7d') => {
+  const [stats, setStats] = useState<DashboardStats[]>([]);
+  const [recentActivity, setRecentActivity] = useState<RecentActivity[]>([]);
+  const [customerGrowthData, setCustomerGrowthData] = useState<CustomerGrowthData[]>([]);
+  const [rewardDistribution, setRewardDistribution] = useState<RewardDistributionData[]>([]);
+  const [weeklyActivity, setWeeklyActivity] = useState<any[]>([]);
+  const [loyaltyROI, setLoyaltyROI] = useState<LoyaltyROIData | null>(null);
+  const [monthlyTrends, setMonthlyTrends] = useState<MonthlyTrendData[]>([]);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
-  const [subscription, setSubscription] = useState<any>(null);
-  const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
-  const [invoices, setInvoices] = useState<Invoice[]>([]);
-  const [actionLoading, setActionLoading] = useState<string | null>(null);
-  const [error, setError] = useState('');
-  const [showCancelModal, setShowCancelModal] = useState(false);
-  const [showAddPaymentModal, setShowAddPaymentModal] = useState(false);
-  const [cancelReason, setCancelReason] = useState('');
-  
-  const { user } = useAuth();
+  const [error, setError] = useState<string | null>(null);
+  const { user, restaurant } = useAuth();
 
-  const fetchSubscriptionData = async () => {
+  // Check if we should use cached data
+  const shouldUseCachedData = (cacheKey: string) => {
+    const cached = dataCache.get(cacheKey);
+    if (!cached) return false;
+    
+    const now = Date.now();
+    return (now - cached.timestamp) < CACHE_DURATION;
+  };
+
+  // Store data in cache
+  const setCachedData = (cacheKey: string, data: any) => {
+    dataCache.set(cacheKey, {
+      data,
+      timestamp: Date.now()
+    });
+  };
+
+  // Get cached data
+  const getCachedData = (cacheKey: string) => {
+    const cached = dataCache.get(cacheKey);
+    return cached?.data;
+  };
+
+  const currentUser = {
+    name: user?.user_metadata?.first_name && user?.user_metadata?.last_name 
+      ? `${user.user_metadata.first_name} ${user.user_metadata.last_name}`
+      : user?.email?.split('@')[0] || 'User',
+    role: 'Restaurant Owner',
+    avatar: user?.user_metadata?.first_name?.[0]?.toUpperCase() || 'U'
+  };
+
+  const fetchCustomerGrowthData = async (restaurantId: string) => {
+    try {
+      const daysBack = timeRange === '7d' ? 7 : timeRange === '30d' ? 30 : 90;
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - daysBack);
+
+      const { data: customers, error } = await supabase
+        .from('customers')
+        .select('created_at, visit_count')
+        .eq('restaurant_id', restaurantId)
+        .gte('created_at', startDate.toISOString());
+
+      if (error) throw error;
+
+      // Group customers by date
+      const growthMap = new Map<string, { new: number; returning: number; total: number }>();
+      
+      for (let i = 0; i < daysBack; i++) {
+        const date = new Date();
+        date.setDate(date.getDate() - i);
+        const dateStr = date.toISOString().split('T')[0];
+        growthMap.set(dateStr, { new: 0, returning: 0, total: 0 });
+      }
+
+      customers.forEach(customer => {
+        const dateStr = customer.created_at.split('T')[0];
+        const data = growthMap.get(dateStr);
+        if (data) {
+          data.new += 1;
+          data.total += 1;
+          if (customer.visit_count > 1) {
+            data.returning += 1;
+          }
+        }
+      });
+
+      const growthData: CustomerGrowthData[] = Array.from(growthMap.entries())
+        .map(([date, data]) => ({
+          date: new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+          newCustomers: data.new,
+          returningCustomers: data.returning,
+          totalCustomers: data.total
+        }))
+        .reverse();
+
+      return growthData;
+    } catch (error) {
+      console.error('Error fetching customer growth data:', error);
+      return [];
+    }
+  };
+
+  const fetchRewardDistribution = async (restaurantId: string) => {
+    try {
+      const { data: rewards, error } = await supabase
+        .from('rewards')
+        .select('category, total_redeemed')
+        .eq('restaurant_id', restaurantId);
+
+      if (error) throw error;
+
+      const categoryMap = new Map<string, number>();
+      rewards.forEach(reward => {
+        const current = categoryMap.get(reward.category) || 0;
+        categoryMap.set(reward.category, current + reward.total_redeemed);
+      });
+
+      const total = Array.from(categoryMap.values()).reduce((sum, val) => sum + val, 0);
+      const colors = ['#1E2A78', '#3B4B9A', '#8B5CF6', '#06B6D4', '#10B981', '#F59E0B'];
+      
+      const distributionData: RewardDistributionData[] = Array.from(categoryMap.entries())
+        .map(([category, value], index) => ({
+          name: category.charAt(0).toUpperCase() + category.slice(1),
+          value,
+          color: colors[index % colors.length],
+          percentage: total > 0 ? Math.round((value / total) * 100) : 0
+        }))
+        .filter(item => item.value > 0);
+
+      return distributionData;
+    } catch (error) {
+      console.error('Error fetching reward distribution:', error);
+      return [];
+    }
+  };
+
+  const fetchLoyaltyROI = async (restaurantId: string) => {
+    try {
+      // Get customer spending data
+      const { data: customers, error: customersError } = await supabase
+        .from('customers')
+        .select('total_spent, visit_count, total_points, lifetime_points')
+        .eq('restaurant_id', restaurantId);
+
+      if (customersError) throw customersError;
+
+      // Get reward redemption costs
+      const { data: redemptions, error: redemptionsError } = await supabase
+        .from('reward_redemptions')
+        .select('points_used')
+        .eq('restaurant_id', restaurantId);
+
+      if (redemptionsError) throw redemptionsError;
+
+      // Get restaurant settings for point value calculation
+      const { data: restaurantData, error: restaurantError } = await supabase
+        .from('restaurants')
+        .select('settings')
+        .eq('id', restaurantId)
+        .maybeSingle();
+
+      if (restaurantError) throw restaurantError;
+
+      const pointsPerDollar = restaurantData.settings?.points_per_dollar || 1;
+      const pointValue = 1 / pointsPerDollar; // Each point is worth this much in dollars
+
+      // Calculate metrics
+      const totalRevenue = customers.reduce((sum, c) => sum + parseFloat(c.total_spent.toString()), 0);
+      const loyaltyCustomers = customers.filter(c => c.visit_count > 1);
+      const loyaltyRevenue = loyaltyCustomers.reduce((sum, c) => sum + parseFloat(c.total_spent.toString()), 0);
+      
+      const totalRewardCosts = redemptions.reduce((sum, r) => sum + (r.points_used * pointValue), 0);
+      const netProfit = loyaltyRevenue - totalRewardCosts;
+      const roi = loyaltyRevenue > 0 ? ((netProfit / totalRewardCosts) * 100) : 0;
+      
+      const averageOrderValue = customers.length > 0 ? totalRevenue / customers.reduce((sum, c) => sum + c.visit_count, 0) : 0;
+      const loyaltyAOV = loyaltyCustomers.length > 0 ? loyaltyRevenue / loyaltyCustomers.reduce((sum, c) => sum + c.visit_count, 0) : 0;
+      const retentionRate = customers.length > 0 ? (loyaltyCustomers.length / customers.length) * 100 : 0;
+
+      return {
+        totalRevenue,
+        loyaltyRevenue,
+        rewardCosts: totalRewardCosts,
+        netProfit,
+        roi,
+        averageOrderValue,
+        loyaltyAOV,
+        retentionRate
+      };
+    } catch (error) {
+      console.error('Error fetching loyalty ROI:', error);
+      return null;
+    }
+  };
+
+  const fetchMonthlyTrends = async (restaurantId: string) => {
+    try {
+      const months = [];
+      for (let i = 5; i >= 0; i--) {
+        const date = new Date();
+        date.setMonth(date.getMonth() - i);
+        months.push({
+          start: new Date(date.getFullYear(), date.getMonth(), 1),
+          end: new Date(date.getFullYear(), date.getMonth() + 1, 0),
+          name: date.toLocaleDateString('en-US', { month: 'short' })
+        });
+      }
+
+      const trendsData: MonthlyTrendData[] = [];
+
+      for (const month of months) {
+        const { data: customers, error } = await supabase
+          .from('customers')
+          .select('total_spent, visit_count, created_at')
+          .eq('restaurant_id', restaurantId)
+          .gte('created_at', month.start.toISOString())
+          .lte('created_at', month.end.toISOString());
+
+        if (error) throw error;
+
+        const monthRevenue = customers.reduce((sum, c) => sum + parseFloat(c.total_spent.toString()), 0);
+        const loyaltyRevenue = customers.filter(c => c.visit_count > 1).reduce((sum, c) => sum + parseFloat(c.total_spent.toString()), 0);
+        
+        // Estimate reward costs (simplified)
+        const estimatedRewardCosts = loyaltyRevenue * 0.05; // Assume 5% of loyalty revenue goes to rewards
+        const netProfit = loyaltyRevenue - estimatedRewardCosts;
+
+        trendsData.push({
+          month: month.name,
+          revenue: monthRevenue,
+          loyaltyRevenue,
+          rewardCosts: estimatedRewardCosts,
+          netProfit
+        });
+      }
+
+      return trendsData;
+    } catch (error) {
+      console.error('Error fetching monthly trends:', error);
+      return [];
+    }
+  };
+
+  const fetchRecentActivity = async (restaurantId: string) => {
+    try {
+      const { data: transactions, error } = await supabase
+        .from('transactions')
+        .select(`
+          *,
+          customer:customers(first_name, last_name, current_tier),
+          reward:rewards(name)
+        `)
+        .eq('restaurant_id', restaurantId)
+        .order('created_at', { ascending: false })
+        .limit(10);
+
+      if (error) throw error;
+
+      return transactions.map((transaction: any) => ({
+        id: transaction.id,
+        customer: `${transaction.customer.first_name} ${transaction.customer.last_name}`,
+        avatar: `${transaction.customer.first_name[0]}${transaction.customer.last_name[0]}`,
+        action: transaction.description || `${transaction.type} transaction`,
+        points: transaction.points > 0 ? `+${transaction.points}` : transaction.points.toString(),
+        time: new Date(transaction.created_at).toLocaleDateString('en-US', { 
+          month: 'short', 
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        }),
+        tier: transaction.customer.current_tier,
+        reward: transaction.reward?.name
+      }));
+    } catch (error) {
+      console.error('Error fetching recent activity:', error);
+      return [];
+    }
+  };
+
+  const fetchDashboardData = useCallback(async () => {
     if (!user) return;
+    
+    const cacheKey = `dashboard-${restaurant?.id || 'no-restaurant'}-${timeRange}`;
+    
+    // Check if we should use cached data
+    if (shouldUseCachedData(cacheKey)) {
+      const cachedData = getCachedData(cacheKey);
+      if (cachedData) {
+        setStats(cachedData.stats);
+        setRecentActivity(cachedData.recentActivity);
+        setCustomerGrowthData(cachedData.customerGrowthData);
+        setRewardDistribution(cachedData.rewardDistribution);
+        setWeeklyActivity(cachedData.weeklyActivity);
+        setLoyaltyROI(cachedData.loyaltyROI);
+        setMonthlyTrends(cachedData.monthlyTrends);
+        setNotifications(cachedData.notifications);
+        setLoading(false);
+        return;
+      }
+    }
     
     try {
       setLoading(true);
-      const subscriptionData = await SubscriptionService.checkSubscriptionAccess(user.id);
-      setSubscription(subscriptionData);
-    } catch (error) {
-      console.error('Error fetching subscription:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+      setError(null);
 
-  const loadBillingData = async () => {
-    if (!user) return;
-
-    try {
-      setLoading(true);
-      setError('');
-
-      // Load fresh subscription data
-      const subscriptionData = await SubscriptionService.checkSubscriptionAccess(user.id);
-      console.log('💳 Loaded subscription data:', subscriptionData);
-      setSubscription(subscriptionData);
-
-      // Load payment methods and invoices
-      if (subscriptionData?.subscription?.stripe_customer_id) {
-        try {
-          // Mock payment methods for demo - in production, call your backend
-          setPaymentMethods([
-            {
-              id: 'pm_default',
-              type: 'card',
-              card: {
-                brand: 'visa',
-                last4: '4242',
-                exp_month: 12,
-                exp_year: 2025
-              },
-              is_default: true
-            }
-          ]);
-
-          // Create invoice based on subscription
-          const planAmounts: Record<string, number> = {
-            monthly: 299,
-            semiannual: 999,
-            annual: 1999,
-            trial: 0
-          };
-
-          const amount = planAmounts[subscriptionData.subscription.plan_type] || 0;
-          
-          if (amount > 0) {
-            setInvoices([
-              {
-                id: `in_${subscriptionData.subscription.id.slice(-10)}`,
-                amount,
-                status: 'paid',
-                created: Math.floor(new Date(subscriptionData.subscription.current_period_start).getTime() / 1000),
-                period_start: Math.floor(new Date(subscriptionData.subscription.current_period_start).getTime() / 1000),
-                period_end: Math.floor(new Date(subscriptionData.subscription.current_period_end).getTime() / 1000)
-              }
-            ]);
-          } else {
-            setInvoices([]);
+      // If no restaurant, show empty state
+      if (!restaurant) {
+        console.log('No restaurant found, showing empty state');
+        setStats([
+          {
+            name: 'Total Customers',
+            value: '0',
+            change: '+0',
+            trend: 'up',
+            description: 'No customers yet'
+          },
+          {
+            name: 'Total Points Issued',
+            value: '0',
+            change: '+0%',
+            trend: 'up',
+            description: 'All points given to customers'
+          },
+          {
+            name: 'Rewards Claimed',
+            value: '0',
+            change: '+0%',
+            trend: 'up',
+            description: 'vs last month'
+          },
+          {
+            name: 'Revenue Impact',
+            value: '$0',
+            change: '+0%',
+            trend: 'up',
+            description: 'Total customer value'
           }
-        } catch (stripeError) {
-          console.warn('Could not load Stripe data:', stripeError);
-          setPaymentMethods([]);
-          setInvoices([]);
-        }
-      } else {
-        setPaymentMethods([]);
-        setInvoices([]);
+        ]);
+        
+        setRecentActivity([]);
+        setCustomerGrowthData([]);
+        setRewardDistribution([]);
+        setWeeklyActivity([]);
+        setLoyaltyROI(null);
+        setMonthlyTrends([]);
+        setNotifications([
+          {
+            id: '1',
+            type: 'info',
+            title: 'Welcome to TableLoyalty!',
+            message: 'Start by creating your first customer or reward',
+            time: 'Just now'
+          }
+        ]);
+        
+        setLoading(false);
+        return;
       }
 
+      // Fetch real customer and reward stats with increased timeout
+      const [
+        customerStats, 
+        rewardStats, 
+        growthData, 
+        distributionData, 
+        roiData, 
+        trendsData, 
+        activityData
+      ] = await Promise.all([
+        Promise.race([
+          CustomerService.getCustomerStats(restaurant.id),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Customer stats timeout')), 15000) // Increased timeout
+          )
+        ]),
+        Promise.race([
+          RewardService.getRewardStats(restaurant.id),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Reward stats timeout')), 15000) // Increased timeout
+          )
+        ]),
+        fetchCustomerGrowthData(restaurant.id),
+        fetchRewardDistribution(restaurant.id),
+        fetchLoyaltyROI(restaurant.id),
+        fetchMonthlyTrends(restaurant.id),
+        fetchRecentActivity(restaurant.id)
+      ]);
+
+      // Calculate total points issued (not just current balance)
+      const { data: allTransactions } = await supabase
+        .from('transactions')
+        .select('points')
+        .eq('restaurant_id', restaurant.id)
+        .gt('points', 0); // Only positive point transactions (issued points)
+      
+      const totalPointsIssued = allTransactions?.reduce((sum, t) => sum + t.points, 0) || 0;
+      // Generate real stats from database
+      const dashboardStats: DashboardStats[] = [
+        {
+          name: 'Total Customers',
+          value: (customerStats as any).totalCustomers.toString(),
+          change: `+${(customerStats as any).newThisMonth}`,
+          trend: 'up',
+          description: 'New this month'
+        },
+        {
+          name: 'Total Points Issued',
+          value: totalPointsIssued.toLocaleString(),
+          change: '+0%',
+          trend: 'up',
+          description: 'All points given to customers'
+        },
+        {
+          name: 'Rewards Claimed',
+          value: (rewardStats as any).totalRedemptions.toString(),
+          change: '+0%',
+          trend: 'up',
+          description: 'vs last month'
+        },
+        {
+          name: 'Revenue Impact',
+          value: `$${((customerStats as any).averageSpent * (customerStats as any).totalCustomers).toFixed(0)}`,
+          change: '+0%',
+          trend: 'up',
+          description: 'Total customer value'
+        }
+      ];
+
+      setStats(dashboardStats);
+      setCustomerGrowthData(growthData);
+      setRewardDistribution(distributionData);
+      setWeeklyActivity([]);
+      setLoyaltyROI(roiData);
+      setMonthlyTrends(trendsData);
+      setRecentActivity(activityData);
+      setNotifications([]);
+
+      // Cache the data
+      setCachedData(cacheKey, {
+        stats: dashboardStats,
+        recentActivity: activityData,
+        customerGrowthData: growthData,
+        rewardDistribution: distributionData,
+        weeklyActivity: [],
+        loyaltyROI: roiData,
+        monthlyTrends: trendsData,
+        notifications: []
+      });
+
     } catch (err: any) {
-      console.error('Error loading billing data:', err);
-      setError('Failed to load billing information');
+      console.error('Error fetching dashboard data:', err);
+      setError(err.message || 'Failed to load dashboard data');
     } finally {
       setLoading(false);
     }
-  };
+  }, [restaurant]);
+
+  const refreshData = useCallback(() => {
+    fetchDashboardData();
+  }, [fetchDashboardData]);
+
+  // Add subscription refresh function
+  const refreshSubscription = useCallback(async () => {
+    if (user) {
+      try {
+        // Force refresh subscription data
+        const subscriptionData = await SubscriptionService.checkSubscriptionAccess(user.id);
+        console.log('🔄 Subscription refreshed:', subscriptionData);
+        
+        // Trigger a re-render by updating a timestamp or similar
+        window.dispatchEvent(new CustomEvent('subscription-updated'));
+      } catch (error) {
+        console.error('Error refreshing subscription:', error);
+      }
+    }
+  }, [user]);
 
   useEffect(() => {
-    fetchSubscriptionData();
-  }, [user]);
+    // Only fetch data if we have a user and no valid cache
+    const cacheKey = `dashboard-${restaurant?.id || 'no-restaurant'}-${timeRange}`;
+    if (user && !shouldUseCachedData(cacheKey)) {
+      fetchDashboardData();
+    } else if (user && shouldUseCachedData(cacheKey)) {
+      // Load from cache immediately
+      const cachedData = getCachedData(cacheKey);
+      if (cachedData) {
+        setStats(cachedData.stats);
+        setRecentActivity(cachedData.recentActivity);
+        setCustomerGrowthData(cachedData.customerGrowthData);
+        setRewardDistribution(cachedData.rewardDistribution);
+        setWeeklyActivity(cachedData.weeklyActivity);
+        setLoyaltyROI(cachedData.loyaltyROI);
+        setMonthlyTrends(cachedData.monthlyTrends);
+        setNotifications(cachedData.notifications);
+        setLoading(false);
+      }
+    }
+  }, [user, restaurant, timeRange, fetchDashboardData]);
 
   // Listen for subscription updates
   useEffect(() => {
     const handleSubscriptionUpdate = () => {
-      console.log('🔄 Billing page: Subscription update event received');
-      fetchSubscriptionData();
+      console.log('🔄 Subscription update event received in dashboard');
+      // Add a small delay to ensure backend has processed the update
+      setTimeout(() => {
+        refreshData();
+      }, 1000);
     };
 
     window.addEventListener('subscription-updated', handleSubscriptionUpdate);
-    return () => window.removeEventListener('subscription-updated', handleSubscriptionUpdate);
-  }, []);
-
-  useEffect(() => {
-    if (user) {
-      loadBillingData();
-    }
-  }, [user]);
-
-  const handleCancelSubscription = async () => {
-    if (!subscription?.subscription?.id) return;
-
-    try {
-      setActionLoading('cancel');
-      
-      // Update subscription status to cancelled in our database
-      await SubscriptionService.updateSubscriptionStatus(subscription.subscription.id, 'cancelled');
-      
-      // Refresh subscription data
-      await loadBillingData();
-      setShowCancelModal(false);
-      setCancelReason('');
-      
-      // Show success message
-      alert('Subscription cancelled successfully. You will retain access until the end of your billing period.');
-      
-    } catch (err: any) {
-      setError(err.message || 'Failed to cancel subscription');
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleAddPaymentMethod = async () => {
-    try {
-      setActionLoading('add-payment');
-      
-      if (!subscription?.subscription?.stripe_customer_id) {
-        throw new Error('No Stripe customer found');
-      }
-
-      // Create setup intent for adding payment method
-      const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/create-setup-intent`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          customerId: subscription.subscription.stripe_customer_id
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to create setup intent');
-      }
-
-      const { setupIntent } = await response.json();
-      
-      // Load Stripe and create elements
-      const stripe = await loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY);
-      if (!stripe) {
-        throw new Error('Failed to load Stripe');
-      }
-
-      // Redirect to Stripe's hosted setup page
-      const { error: redirectError } = await stripe.redirectToCheckout({
-        sessionId: setupIntent.id
-      });
-
-      if (redirectError) {
-        throw new Error(redirectError.message);
-      }
-      
-      // Note: User will be redirected back after adding payment method
-      
-    } catch (err: any) {
-      setError(err.message || 'Failed to add payment method');
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleRemovePaymentMethod = async (paymentMethodId: string) => {
-    if (!confirm('Are you sure you want to remove this payment method?')) return;
-
-    try {
-      setActionLoading(`remove-${paymentMethodId}`);
-      
-      // Call backend to detach payment method
-      const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/detach-payment-method`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          paymentMethodId
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to remove payment method');
-      }
-
-      // Refresh payment methods
-      await loadBillingData();
-      
-    } catch (err: any) {
-      setError(err.message || 'Failed to remove payment method');
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleSetDefaultPaymentMethod = async (paymentMethodId: string) => {
-    try {
-      setActionLoading(`default-${paymentMethodId}`);
-      
-      // Call backend to set default payment method
-      const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/set-default-payment-method`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          paymentMethodId,
-          customerId: subscription?.subscription?.stripe_customer_id
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to set default payment method');
-      }
-
-      // Refresh payment methods
-      await loadBillingData();
-      
-    } catch (err: any) {
-      setError(err.message || 'Failed to set default payment method');
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const formatDate = (timestamp: number) => {
-    return new Date(timestamp * 1000).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric'
-    });
-  };
-
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-      minimumFractionDigits: 2
-    }).format(amount / 100);
-  };
-
-  const getPlanDisplayName = (planType: string) => {
-    switch (planType) {
-      case 'monthly': return 'Monthly Plan';
-      case 'semiannual': return '6-Month Plan';
-      case 'annual': return 'Annual Plan';
-      case 'trial': return 'Free Trial';
-      default: return 'Unknown Plan';
-    }
-  };
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'active': return 'bg-green-100 text-green-800';
-      case 'past_due': return 'bg-yellow-100 text-yellow-800';
-      case 'cancelled': return 'bg-red-100 text-red-800';
-      case 'expired': return 'bg-gray-100 text-gray-800';
-      default: return 'bg-gray-100 text-gray-800';
-    }
-  };
-
-  const getNextBillingInfo = () => {
-    if (!subscription?.subscription) return { text: 'N/A', isOneTime: false };
     
-    const plan = subscription.subscription.plan_type;
-    const endDate = subscription.subscription.current_period_end;
-    
-    switch (plan) {
-      case 'annual':
-        return { 
-          text: endDate ? new Date(endDate).toLocaleDateString() : 'N/A',
-          isOneTime: true,
-          expires: endDate ? new Date(endDate).toLocaleDateString() : 'N/A',
-          isExpired: endDate ? new Date(endDate) < new Date() : false
-        };
-      case 'semiannual':
-        return { 
-          text: endDate ? new Date(endDate).toLocaleDateString() : 'N/A',
-          isOneTime: true,
-          expires: endDate ? new Date(endDate).toLocaleDateString() : 'N/A',
-          isExpired: endDate ? new Date(endDate) < new Date() : false
-        };
-      case 'monthly':
-        return { 
-          text: endDate ? new Date(endDate).toLocaleDateString() : 'N/A', 
-          isOneTime: false,
-          isExpired: endDate ? new Date(endDate) < new Date() : false
-        };
-      case 'trial':
-        return { 
-          text: endDate ? new Date(endDate).toLocaleDateString() : 'N/A', 
-          isOneTime: false,
-          isExpired: endDate ? new Date(endDate) < new Date() : false
-        };
-      default:
-        return { text: 'N/A', isOneTime: false, isExpired: false };
-    }
+    return () => {
+      window.removeEventListener('subscription-updated', handleSubscriptionUpdate);
+    };
+  }, [refreshData]);
+
+  return {
+    stats,
+    recentActivity,
+    customerGrowthData,
+    rewardDistribution,
+    weeklyActivity,
+    loyaltyROI,
+    monthlyTrends,
+    notifications,
+    currentUser,
+    loading,
+    error,
+    refreshData,
+    refreshSubscription
   };
-
-  const getBillingPeriodText = () => {
-    if (!subscription?.subscription) return 'N/A';
-    
-    const plan = subscription.subscription.plan_type;
-    const startDate = subscription.subscription.current_period_start;
-    const endDate = subscription.subscription.current_period_end;
-    
-    if (!startDate || !endDate) return 'N/A';
-    
-    const start = new Date(startDate).toLocaleDateString();
-    const end = new Date(endDate).toLocaleDateString();
-    
-    // Use plan type for accurate labeling
-    let periodLabel = '';
-    switch (plan) {
-      case 'annual':
-        periodLabel = '1 year';
-        break;
-      case 'semiannual':
-        periodLabel = '6 months';
-        break;
-      case 'monthly':
-        periodLabel = '1 month';
-        break;
-      case 'trial':
-        periodLabel = 'trial period';
-        break;
-      default:
-        periodLabel = 'unknown';
-    }
-    
-    return `${start} - ${end} (${periodLabel})`;
-  };
-
-  if (loading) {
-    return (
-      <div className="animate-pulse space-y-6">
-        <div className="h-8 bg-gray-200 rounded w-64 mb-6"></div>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="h-64 bg-gray-200 rounded-2xl"></div>
-          <div className="h-64 bg-gray-200 rounded-2xl"></div>
-        </div>
-      </div>
-    );
-  }
-
-  const nextBillingInfo = getNextBillingInfo();
-
-  return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Billing & Subscription</h1>
-          <p className="text-gray-600 mt-1">Manage your subscription and payment methods</p>
-        </div>
-        <button
-          onClick={loadBillingData}
-          className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-        >
-          <RefreshCw className="h-5 w-5" />
-        </button>
-      </div>
-
-      {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl flex items-center gap-3">
-          <AlertCircle className="h-5 w-5" />
-          {error}
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Current Subscription */}
-        <div className="bg-white rounded-2xl p-6 border border-gray-200">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center">
-              <Crown className="h-6 w-6 text-blue-600" />
-            </div>
-            <div>
-              <h3 className="text-lg font-semibold text-gray-900">Current Plan</h3>
-              <p className="text-sm text-gray-600">Your active subscription details</p>
-            </div>
-          </div>
-
-          {subscription?.subscription ? (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-gray-600">Plan</span>
-                <span className="font-semibold text-gray-900">
-                  {getPlanDisplayName(subscription.subscription.plan_type)}
-                </span>
-              </div>
-              
-              <div className="flex items-center justify-between">
-                <span className="text-gray-600">Status</span>
-                <span className={`px-3 py-1 rounded-full text-sm font-medium ${getStatusColor(subscription.subscription.status)}`}>
-                  {subscription.subscription.status.charAt(0).toUpperCase() + subscription.subscription.status.slice(1)}
-                </span>
-              </div>
-
-              <div className="flex items-center justify-between">
-                <span className="text-gray-600">
-                  {subscription.subscription.plan_type === 'trial' ? 'Trial Expires' :
-                   subscription.subscription.plan_type === 'monthly' ? 'Next Billing' :
-                   'Plan Expires'}
-                </span>
-                <span className="font-semibold text-gray-900">
-                  {nextBillingInfo.text}
-                </span>
-              </div>
-
-              <div className="flex items-center justify-between">
-                <span className="text-gray-600">Billing Period</span>
-                <span className="font-semibold text-gray-900 text-sm">
-                  {getBillingPeriodText()}
-                </span>
-              </div>
-
-              {subscription.daysRemaining !== undefined && (
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-600">Days Remaining</span>
-                  <span className={`font-semibold ${subscription.daysRemaining <= 7 ? 'text-red-600' : 'text-gray-900'}`}>
-                    {subscription.daysRemaining} days
-                    {(subscription.subscription.plan_type === 'annual' || subscription.subscription.plan_type === 'semiannual') && (
-                      <span className="text-xs text-gray-500 ml-1">
-                        ({subscription.subscription.plan_type} plan)
-                      </span>
-                    )}
-                  </span>
-                </div>
-              )}
-
-              {subscription.subscription.plan_type !== 'trial' && subscription.subscription.status !== 'cancelled' && (
-                <div className="pt-4 border-t border-gray-200">
-                  <button
-                    onClick={() => setShowCancelModal(true)}
-                    className="w-full py-2 px-4 text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors text-sm font-medium"
-                  >
-                    Cancel Subscription
-                  </button>
-                </div>
-              )}
-
-              {subscription.subscription.status === 'cancelled' && (
-                <div className="pt-4 border-t border-gray-200">
-                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
-                    <p className="text-yellow-800 text-sm font-medium">
-                      Subscription cancelled. Access ends on {nextBillingInfo.expires || 'N/A'}
-                    </p>
-                  </div>
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="text-center py-8">
-              <Crown className="h-16 w-16 text-gray-300 mx-auto mb-4" />
-              <h4 className="text-xl font-semibold text-gray-900 mb-2">No active subscription</h4>
-              <p className="text-gray-600 mb-6">
-                You're currently on the free trial. Upgrade to unlock all features.
-              </p>
-              <button 
-                onClick={() => window.location.href = '/upgrade'}
-                className="bg-gradient-to-r from-[#E6A85C] via-[#E85A9B] to-[#D946EF] text-white px-6 py-3 rounded-xl hover:shadow-lg transition-all duration-200"
-              >
-                Choose a Plan
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Payment Methods */}
-        <div className="bg-white rounded-2xl p-6 border border-gray-200">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center">
-                <CreditCard className="h-6 w-6 text-green-600" />
-              </div>
-              <div>
-                <h3 className="text-lg font-semibold text-gray-900">Payment Methods</h3>
-                <p className="text-sm text-gray-600">Manage your payment options</p>
-              </div>
-            </div>
-            <button
-              onClick={() => setShowAddPaymentModal(true)}
-              className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-            >
-              <Plus className="h-5 w-5" />
-            </button>
-          </div>
-
-          {paymentMethods.length === 0 ? (
-            <div className="text-center py-8">
-              <CreditCard className="h-12 w-12 text-gray-300 mx-auto mb-4" />
-              <p className="text-gray-500 mb-4">No payment methods added</p>
-              <button
-                onClick={() => setShowAddPaymentModal(true)}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-              >
-                Add Payment Method
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {paymentMethods.map((method) => (
-                <div key={method.id} className="flex items-center justify-between p-4 border border-gray-200 rounded-lg">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center">
-                      <CreditCard className="h-5 w-5 text-gray-600" />
-                    </div>
-                    <div>
-                      <p className="font-medium text-gray-900">
-                        {method.card?.brand.toUpperCase()} •••• {method.card?.last4}
-                      </p>
-                      <p className="text-sm text-gray-600">
-                        Expires {method.card?.exp_month}/{method.card?.exp_year}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {method.is_default ? (
-                      <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full font-medium flex items-center gap-1">
-                        <Check className="h-3 w-3" />
-                        Default
-                      </span>
-                    ) : (
-                      <button
-                        onClick={() => handleSetDefaultPaymentMethod(method.id)}
-                        disabled={actionLoading === `default-${method.id}`}
-                        className="px-2 py-1 bg-gray-100 text-gray-600 text-xs rounded-full font-medium hover:bg-gray-200 transition-colors disabled:opacity-50"
-                      >
-                        {actionLoading === `default-${method.id}` ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : (
-                          'Set Default'
-                        )}
-                      </button>
-                    )}
-                    <button 
-                      onClick={() => handleRemovePaymentMethod(method.id)}
-                      disabled={actionLoading === `remove-${method.id}`}
-                      className="p-2 text-red-400 hover:text-red-600 rounded-lg hover:bg-red-50 transition-colors disabled:opacity-50"
-                    >
-                      {actionLoading === `remove-${method.id}` ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Trash2 className="h-4 w-4" />
-                      )}
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Billing History */}
-      <div className="bg-white rounded-2xl p-6 border border-gray-200">
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center">
-              <Receipt className="h-6 w-6 text-purple-600" />
-            </div>
-            <div>
-              <h3 className="text-lg font-semibold text-gray-900">Billing History</h3>
-              <p className="text-sm text-gray-600">Download invoices and view payment history</p>
-            </div>
-          </div>
-        </div>
-
-        {invoices.length === 0 ? (
-          <div className="text-center py-8">
-            <Receipt className="h-12 w-12 text-gray-300 mx-auto mb-4" />
-            <p className="text-gray-500">No billing history available</p>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-gray-200">
-                  <th className="text-left py-3 px-4 font-medium text-gray-700">Date</th>
-                  <th className="text-left py-3 px-4 font-medium text-gray-700">Amount</th>
-                  <th className="text-left py-3 px-4 font-medium text-gray-700">Status</th>
-                  <th className="text-left py-3 px-4 font-medium text-gray-700">Period</th>
-                  <th className="text-right py-3 px-4 font-medium text-gray-700">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {invoices.map((invoice) => (
-                  <tr key={invoice.id} className="border-b border-gray-100 hover:bg-gray-50">
-                    <td className="py-3 px-4 text-gray-900">
-                      {formatDate(invoice.created)}
-                    </td>
-                    <td className="py-3 px-4 font-semibold text-gray-900">
-                      {formatCurrency(invoice.amount)}
-                    </td>
-                    <td className="py-3 px-4">
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                        invoice.status === 'paid' ? 'bg-green-100 text-green-800' :
-                        invoice.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
-                        'bg-red-100 text-red-800'
-                      }`}>
-                        {invoice.status.charAt(0).toUpperCase() + invoice.status.slice(1)}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 text-gray-600 text-sm">
-                      {formatDate(invoice.period_start)} - {formatDate(invoice.period_end)}
-                    </td>
-                    <td className="py-3 px-4 text-right">
-                      <button className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition-colors">
-                        <Download className="h-4 w-4" />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* Usage & Limits */}
-      <div className="bg-white rounded-2xl p-6 border border-gray-200">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="w-12 h-12 bg-yellow-100 rounded-xl flex items-center justify-center">
-            <TrendingUp className="h-6 w-6 text-yellow-600" />
-          </div>
-          <div>
-            <h3 className="text-lg font-semibold text-gray-900">Plan Features</h3>
-            <p className="text-sm text-gray-600">Available features in your current plan</p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-600">Customers</span>
-              <span className="text-sm font-medium text-gray-900">
-                {subscription?.features?.maxCustomers === -1 ? 'Unlimited' : `${subscription?.features?.maxCustomers || 100} max`}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-600">Branches</span>
-              <span className="text-sm font-medium text-gray-900">
-                {subscription?.features?.maxBranches === -1 ? 'Unlimited' : `${subscription?.features?.maxBranches || 1} max`}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-600">Multi-Branch Support</span>
-              <span className={`text-sm font-medium ${subscription?.features?.maxBranches > 1 ? 'text-green-600' : 'text-gray-400'}`}>
-                {subscription?.features?.maxBranches > 1 ? 'Included' : 'Not Available'}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <span className="text-gray-600">Custom Branding</span>
-              <span className={`font-semibold ${subscription?.features?.customBranding ? 'text-green-600' : 'text-gray-400'}`}>
-                {subscription?.features?.customBranding ? 'Included' : 'Not Available'}
-              </span>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-600">Advanced Analytics</span>
-              <span className={`text-sm font-medium ${subscription?.features?.advancedAnalytics ? 'text-green-600' : 'text-gray-400'}`}>
-                {subscription?.features?.advancedAnalytics ? 'Included' : 'Not Available'}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-600">Priority Support</span>
-              <span className={`text-sm font-medium ${subscription?.features?.prioritySupport ? 'text-green-600' : 'text-gray-400'}`}>
-                {subscription?.features?.prioritySupport ? 'Included' : 'Not Available'}
-              </span>
-            </div>
-
-
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-600">API Access</span>
-              <span className={`text-sm font-medium ${subscription?.features?.apiAccess ? 'text-green-600' : 'text-gray-400'}`}>
-                {subscription?.features?.apiAccess ? 'Included' : 'Not Available'}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <span className="text-gray-600">White-Label Solution</span>
-              <span className={`font-semibold ${subscription?.subscription?.plan_type === 'annual' ? 'text-green-600' : 'text-gray-400'}`}>
-                {subscription?.subscription?.plan_type === 'annual' ? 'Included' : 'Not Available'}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {subscription?.subscription?.plan_type === 'trial' && (
-          <div className="mt-6 p-4 bg-gradient-to-r from-yellow-50 to-orange-50 border border-yellow-200 rounded-xl">
-            <div className="flex items-center gap-3">
-              <Clock className="h-5 w-5 text-yellow-600" />
-              <div>
-                <p className="font-medium text-yellow-900">Trial Period</p>
-                <p className="text-sm text-yellow-700">
-                  {subscription.daysRemaining > 0 
-                    ? `${subscription.daysRemaining} days remaining in your free trial`
-                    : 'Your trial has expired'
-                  }
-                </p>
-              </div>
-            </div>
-            <button
-              onClick={() => window.location.href = '/upgrade'}
-              className="mt-3 w-full py-2 px-4 bg-gradient-to-r from-[#E6A85C] via-[#E85A9B] to-[#D946EF] text-white rounded-lg hover:shadow-lg transition-all duration-200 font-medium"
-            >
-              Upgrade Now
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Cancel Subscription Modal */}
-      {showCancelModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full">
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-lg font-bold text-gray-900">Cancel Subscription</h3>
-              <button
-                onClick={() => setShowCancelModal(false)}
-                className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              <div className="bg-red-50 border border-red-200 rounded-xl p-4">
-                <div className="flex items-start gap-3">
-                  <AlertCircle className="h-5 w-5 text-red-600 mt-0.5" />
-                  <div>
-                    <p className="font-medium text-red-900 mb-1">Are you sure?</p>
-                    <p className="text-red-700 text-sm">
-                      Cancelling your subscription will:
-                    </p>
-                    <ul className="text-red-700 text-sm mt-2 space-y-1 list-disc list-inside">
-                      <li>End access to premium features after your billing period</li>
-                      <li>Stop automatic billing</li>
-                      <li>Limit customer capacity to 100</li>
-                      <li>Remove advanced analytics and reporting</li>
-                    </ul>
-                  </div>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Reason for cancellation (optional)
-                </label>
-                <textarea
-                  value={cancelReason}
-                  onChange={(e) => setCancelReason(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
-                  placeholder="Help us improve by telling us why you're cancelling..."
-                  rows={3}
-                />
-              </div>
-
-              <p className="text-gray-600 text-sm">
-                Your subscription will remain active until {nextBillingInfo.expires || 'the end of your billing period'}.
-              </p>
-            </div>
-
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={() => setShowCancelModal(false)}
-                className="flex-1 py-3 px-4 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-colors"
-              >
-                Keep Subscription
-              </button>
-              <button
-                onClick={handleCancelSubscription}
-                disabled={actionLoading === 'cancel'}
-                className="flex-1 py-3 px-4 bg-red-600 text-white rounded-xl hover:bg-red-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
-              >
-                {actionLoading === 'cancel' ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  'Cancel Subscription'
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Add Payment Method Modal */}
-      {showAddPaymentModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full">
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-lg font-bold text-gray-900">Add Payment Method</h3>
-              <button
-                onClick={() => setShowAddPaymentModal(false)}
-                className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
-                <div className="flex items-center gap-3">
-                  <Shield className="h-5 w-5 text-blue-600" />
-                  <div>
-                    <p className="text-sm font-medium text-blue-900">Secure Payment</p>
-                    <p className="text-xs text-blue-700">
-                      Your payment information is secured by Stripe
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="text-center py-8">
-                <CreditCard className="h-12 w-12 text-gray-300 mx-auto mb-4" />
-                <p className="text-gray-500 mb-4">Payment method setup would appear here</p>
-                <p className="text-sm text-gray-400">
-                  In production, this would integrate with Stripe Elements
-                </p>
-              </div>
-            </div>
-
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={() => setShowAddPaymentModal(false)}
-                className="flex-1 py-3 px-4 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleAddPaymentMethod}
-                disabled={actionLoading === 'add-payment'}
-                className="flex-1 py-3 px-4 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
-              >
-                {actionLoading === 'add-payment' ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <>
-                    <Plus className="h-4 w-4" />
-                    Add Payment Method
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}; 
-
-export default BillingPage;
+};

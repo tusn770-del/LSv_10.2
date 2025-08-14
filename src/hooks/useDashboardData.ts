@@ -8,6 +8,7 @@ import { useAuth } from '../contexts/AuthContext';
 // Cache for dashboard data with timestamps
 const dataCache = new Map<string, { data: any; timestamp: number }>();
 const CACHE_DURATION = 15 * 60 * 1000; // 15 minutes
+const TAB_CACHE_DURATION = 15 * 60 * 1000; // 15 minutes for tab switching
 const lastFetchTimes = new Map<string, number>();
 
 interface DashboardStats {
@@ -83,13 +84,14 @@ export const useDashboardData = (timeRange: string = '7d') => {
   const [error, setError] = useState<string | null>(null);
   const { user, restaurant } = useAuth();
 
-  // Check if we should use cached data
-  const shouldUseCachedData = (cacheKey: string) => {
+  // Check if we should use cached data (for tab switching)
+  const shouldUseCachedData = (cacheKey: string, isTabSwitch: boolean = false) => {
     const cached = dataCache.get(cacheKey);
     if (!cached) return false;
     
     const now = Date.now();
-    return (now - cached.timestamp) < CACHE_DURATION;
+    const cacheThreshold = isTabSwitch ? TAB_CACHE_DURATION : CACHE_DURATION;
+    return (now - cached.timestamp) < cacheThreshold;
   };
 
   // Store data in cache
@@ -343,13 +345,13 @@ export const useDashboardData = (timeRange: string = '7d') => {
     }
   };
 
-  const fetchDashboardData = useCallback(async () => {
+  const fetchDashboardData = useCallback(async (forceRefresh: boolean = false) => {
     if (!user) return;
     
     const cacheKey = `dashboard-${restaurant?.id || 'no-restaurant'}-${timeRange}`;
     
-    // Check if we should use cached data
-    if (shouldUseCachedData(cacheKey)) {
+    // Check if we should use cached data (unless force refresh)
+    if (!forceRefresh && shouldUseCachedData(cacheKey, true)) {
       const cachedData = getCachedData(cacheKey);
       if (cachedData) {
         setStats(cachedData.stats);
@@ -522,7 +524,7 @@ export const useDashboardData = (timeRange: string = '7d') => {
   }, [restaurant]);
 
   const refreshData = useCallback(() => {
-    fetchDashboardData();
+    fetchDashboardData(true); // Force refresh
   }, [fetchDashboardData]);
 
   // Add subscription refresh function
@@ -542,12 +544,11 @@ export const useDashboardData = (timeRange: string = '7d') => {
   }, [user]);
 
   useEffect(() => {
-    // Only fetch data if we have a user and no valid cache
+    // Check if we have valid cached data first
     const cacheKey = `dashboard-${restaurant?.id || 'no-restaurant'}-${timeRange}`;
-    if (user && !shouldUseCachedData(cacheKey)) {
-      fetchDashboardData();
-    } else if (user && shouldUseCachedData(cacheKey)) {
-      // Load from cache immediately
+    
+    if (user && shouldUseCachedData(cacheKey, true)) {
+      // Load from cache immediately for tab switching
       const cachedData = getCachedData(cacheKey);
       if (cachedData) {
         setStats(cachedData.stats);
@@ -559,7 +560,13 @@ export const useDashboardData = (timeRange: string = '7d') => {
         setMonthlyTrends(cachedData.monthlyTrends);
         setNotifications(cachedData.notifications);
         setLoading(false);
+        return;
       }
+    }
+    
+    // Fetch fresh data if no valid cache
+    if (user) {
+      fetchDashboardData();
     }
   }, [user, restaurant, timeRange, fetchDashboardData]);
 

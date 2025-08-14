@@ -49,7 +49,9 @@ const SupportUI: React.FC = () => {
               // Avoid duplicates
               const exists = prev.some(msg => msg.id === payload.new.id);
               if (exists) return prev;
-              return [...prev, payload.new];
+              return [...prev, payload.new].sort((a, b) => 
+                new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+              );
             });
           } else if (payload.eventType === 'UPDATE' && payload.new) {
             setMessages(prev => prev.map(msg => 
@@ -87,7 +89,9 @@ const SupportUI: React.FC = () => {
     
     try {
       const messagesData = await SupportService.getTicketMessages(selectedTicket.id);
-      setMessages(messagesData);
+      setMessages(messagesData.sort((a, b) => 
+        new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      ));
     } catch (error) {
       console.error('Error fetching messages:', error);
     }
@@ -143,7 +147,7 @@ const SupportUI: React.FC = () => {
       });
 
       setNewMessage('');
-      await fetchMessages();
+      // Don't fetch messages manually - real-time subscription will handle it
     } catch (error) {
       console.error('Error sending message:', error);
       alert('Failed to send message');

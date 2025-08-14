@@ -188,6 +188,7 @@ export class SupportService {
 
   // Subscribe to real-time updates for messages
   static subscribeToMessages(ticketId: string, callback: (payload: any) => void) {
+    console.log('🔌 Subscribing to messages for ticket:', ticketId);
     return supabase
       .channel(`support_messages_${ticketId}`)
       .on('postgres_changes', 
@@ -197,8 +198,17 @@ export class SupportService {
           table: 'support_messages',
           filter: `ticket_id=eq.${ticketId}`
         }, 
-        callback
+        (payload) => {
+          console.log('📨 Message subscription payload for ticket', ticketId, ':', payload);
+          callback({
+            eventType: payload.eventType,
+            new: payload.new,
+            old: payload.old
+          });
+        }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log('📡 Message subscription status for ticket', ticketId, ':', status);
+      });
   }
 }

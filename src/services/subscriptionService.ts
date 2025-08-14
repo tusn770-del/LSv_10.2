@@ -38,7 +38,7 @@ export class SubscriptionService {
         return await this.updateSubscription(existingSubscription.id, planType, stripeSubscriptionId, stripeCustomerId);
       }
 
-      // Calculate period dates based on plan type
+      // Calculate period dates based on plan type with accurate durations
       const now = new Date();
       const periodStart = now.toISOString();
       let periodEnd: Date;
@@ -51,10 +51,12 @@ export class SubscriptionService {
           periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // 30 days
           break;
         case 'semiannual':
-          periodEnd = new Date(now.getTime() + 180 * 24 * 60 * 60 * 1000); // 6 months
+          periodEnd = new Date(now);
+          periodEnd.setMonth(periodEnd.getMonth() + 6); // Exactly 6 months
           break;
         case 'annual':
-          periodEnd = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000); // 1 year
+          periodEnd = new Date(now);
+          periodEnd.setFullYear(periodEnd.getFullYear() + 1); // Exactly 1 year
           break;
         default:
           periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
@@ -130,10 +132,12 @@ export class SubscriptionService {
           periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
           break;
         case 'semiannual':
-          periodEnd = new Date(now.getTime() + 180 * 24 * 60 * 60 * 1000);
+          periodEnd = new Date(now);
+          periodEnd.setMonth(periodEnd.getMonth() + 6);
           break;
         case 'annual':
-          periodEnd = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000);
+          periodEnd = new Date(now);
+          periodEnd.setFullYear(periodEnd.getFullYear() + 1);
           break;
         default:
           periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
