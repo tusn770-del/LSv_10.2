@@ -596,3 +596,28 @@ export const useDashboardData = (timeRange: string = '7d') => {
     refreshSubscription
   };
 };
+
+const BillingPage = () => {
+  const {
+    stats,
+    recentActivity,
+    loading,
+    error
+  } = useDashboardData();
+
+  if (loading) return <div>Loading...</div>;
+  if (error) return <div>{error}</div>;
+
+  return (
+    <div>
+      <h1>Billing Dashboard</h1>
+      {stats.map((s) => (
+        <div key={s.name}>
+          <strong>{s.name}:</strong> {s.value}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+export default BillingPage;
