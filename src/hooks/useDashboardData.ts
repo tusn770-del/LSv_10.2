@@ -8,6 +8,7 @@ import { useAuth } from '../contexts/AuthContext';
 // Cache for dashboard data with timestamps
 const dataCache = new Map<string, { data: any; timestamp: number }>();
 const CACHE_DURATION = 15 * 60 * 1000; // 15 minutes
+const lastFetchTimes = new Map<string, number>();
 
 interface DashboardStats {
   name: string;

@@ -43,7 +43,6 @@ const BillingPage: React.FC = () => {
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [showAddPaymentModal, setShowAddPaymentModal] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
-  const [addingPaymentMethod, setAddingPaymentMethod] = useState(false);
   
   const { user } = useAuth();
 
@@ -180,14 +179,13 @@ const BillingPage: React.FC = () => {
 
   const handleAddPaymentMethod = async () => {
     try {
-      setAddingPaymentMethod(true);
       setActionLoading('add-payment');
       
       if (!subscription?.subscription?.stripe_customer_id) {
         throw new Error('No Stripe customer found');
       }
 
-      // Create a setup intent for adding payment method
+      // Create setup intent for adding payment method
       const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/create-setup-intent`, {
         method: 'POST',
         headers: {
@@ -205,13 +203,22 @@ const BillingPage: React.FC = () => {
 
       const { setupIntent } = await response.json();
       
-      // In a real implementation, you would use Stripe Elements here
-      // For now, we'll simulate adding a payment method
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      // Load Stripe and create elements
+      const stripe = await loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY);
+      if (!stripe) {
+        throw new Error('Failed to load Stripe');
+      }
+
+      // Redirect to Stripe's hosted setup page
+      const { error: redirectError } = await stripe.redirectToCheckout({
+        sessionId: setupIntent.id
+      });
+
+      if (redirectError) {
+        throw new Error(redirectError.message);
+      }
       
-      // Refresh payment methods
-      await loadBillingData();
-      setShowAddPaymentModal(false);
+      // Note: User will be redirected back after adding payment method
       
     } catch (err: any) {
       setError(err.message || 'Failed to add payment method');
@@ -324,19 +331,18 @@ const BillingPage: React.FC = () => {
     
     const plan = subscription.subscription.plan_type;
     const endDate = subscription.subscription.current_period_end;
-    const startDate = subscription.subscription.current_period_start;
     
     switch (plan) {
       case 'annual':
         return { 
-          text: 'One-time payment (1 year)', 
+          text: endDate ? new Date(endDate).toLocaleDateString() : 'N/A',
           isOneTime: true,
           expires: endDate ? new Date(endDate).toLocaleDateString() : 'N/A',
           isExpired: endDate ? new Date(endDate) < new Date() : false
         };
       case 'semiannual':
         return { 
-          text: 'One-time payment (6 months)', 
+          text: endDate ? new Date(endDate).toLocaleDateString() : 'N/A',
           isOneTime: true,
           expires: endDate ? new Date(endDate).toLocaleDateString() : 'N/A',
           isExpired: endDate ? new Date(endDate) < new Date() : false
@@ -370,20 +376,23 @@ const BillingPage: React.FC = () => {
     const start = new Date(startDate).toLocaleDateString();
     const end = new Date(endDate).toLocaleDateString();
     
-    // Calculate actual duration
-    const startTime = new Date(startDate).getTime();
-    const endTime = new Date(endDate).getTime();
-    const durationDays = Math.ceil((endTime - startTime) / (1000 * 60 * 60 * 24));
-    
+    // Use plan type for accurate labeling
     let periodLabel = '';
-    if (durationDays >= 350) {
-      periodLabel = '1 year';
-    } else if (durationDays >= 150) {
-      periodLabel = '6 months';
-    } else if (durationDays >= 25) {
-      periodLabel = '1 month';
-    } else {
-      periodLabel = 'trial';
+    switch (plan) {
+      case 'annual':
+        periodLabel = '1 year';
+        break;
+      case 'semiannual':
+        periodLabel = '6 months';
+        break;
+      case 'monthly':
+        periodLabel = '1 month';
+        break;
+      case 'trial':
+        periodLabel = 'trial period';
+        break;
+      default:
+        periodLabel = 'unknown';
     }
     
     return `${start} - ${end} (${periodLabel})`;
@@ -457,10 +466,12 @@ const BillingPage: React.FC = () => {
 
               <div className="flex items-center justify-between">
                 <span className="text-gray-600">
-                  {nextBillingInfo.isOneTime ? 'Plan Expires' : 'Next Billing'}
+                  {subscription.subscription.plan_type === 'trial' ? 'Trial Expires' :
+                   subscription.subscription.plan_type === 'monthly' ? 'Next Billing' :
+                   'Plan Expires'}
                 </span>
                 <span className="font-semibold text-gray-900">
-                  {nextBillingInfo.isOneTime ? nextBillingInfo.expires : nextBillingInfo.text}
+                  {nextBillingInfo.text}
                 </span>
               </div>
 
