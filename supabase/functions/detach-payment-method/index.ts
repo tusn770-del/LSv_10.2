@@ -22,8 +22,12 @@ Deno.serve(async (req: Request) => {
       throw new Error('Payment method ID is required');
     }
 
+    console.log('🗑️ Detaching payment method:', paymentMethodId);
+
     // Detach payment method from customer
-    await stripe.paymentMethods.detach(paymentMethodId);
+    const detachedPaymentMethod = await stripe.paymentMethods.detach(paymentMethodId);
+
+    console.log('✅ Payment method detached successfully:', detachedPaymentMethod.id);
 
     return new Response(
       JSON.stringify({ success: true }),
@@ -33,7 +37,7 @@ Deno.serve(async (req: Request) => {
       }
     );
   } catch (error) {
-    console.error('Error detaching payment method:', error);
+    console.error('❌ Error detaching payment method:', error);
     return new Response(
       JSON.stringify({ error: error.message }),
       {

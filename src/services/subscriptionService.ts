@@ -38,7 +38,7 @@ export class SubscriptionService {
         return await this.updateSubscription(existingSubscription.id, planType, stripeSubscriptionId, stripeCustomerId);
       }
 
-      // Calculate period dates based on plan type with accurate durations
+      // Calculate period dates based on plan type with EXACT durations
       const now = new Date();
       const periodStart = now.toISOString();
       let periodEnd: Date;
@@ -122,6 +122,7 @@ export class SubscriptionService {
   ): Promise<Subscription> {
     try {
       const now = new Date();
+      const periodStart = now.toISOString();
       let periodEnd: Date;
 
       switch (planType) {
@@ -150,6 +151,7 @@ export class SubscriptionService {
           status: 'active',
           stripe_subscription_id: stripeSubscriptionId,
           stripe_customer_id: stripeCustomerId,
+          current_period_start: periodStart,
           current_period_end: periodEnd.toISOString(),
           updated_at: now.toISOString()
         })
@@ -212,6 +214,8 @@ export class SubscriptionService {
     subscription: Subscription | null;
     features: PlanFeatures;
     daysRemaining?: number;
+    isExpired?: boolean;
+    isCancelled?: boolean;
   }> {
     try {
       // Direct subscription check without RPC function
@@ -224,7 +228,9 @@ export class SubscriptionService {
         hasAccess: true, // Allow access during errors to prevent lockout
         subscription: null,
         features: this.getTrialFeatures(),
-        daysRemaining: 30
+        daysRemaining: 30,
+        isExpired: false,
+        isCancelled: false
       };
     }
   }
@@ -234,26 +240,36 @@ export class SubscriptionService {
     subscription: Subscription | null;
     features: PlanFeatures;
     daysRemaining?: number;
+    isExpired?: boolean;
+    isCancelled?: boolean;
   } {
     if (!subscription) {
       return {
         hasAccess: true, // Allow access for new users
         subscription: null,
         features: this.getTrialFeatures(),
-        daysRemaining: 30
+        daysRemaining: 30,
+        isExpired: false,
+        isCancelled: false
       };
     }
 
     const now = new Date();
     const endDate = new Date(subscription.current_period_end);
-    const hasAccess = subscription.status === 'active' && endDate > now;
+    const isExpired = endDate <= now;
+    const isCancelled = subscription.status === 'cancelled';
+    
+    // Allow access if subscription is active OR cancelled but not yet expired
+    const hasAccess = (subscription.status === 'active' || (isCancelled && !isExpired)) && endDate > now;
     const daysRemaining = Math.ceil((endDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
 
     return {
       hasAccess,
       subscription,
       features: this.getPlanFeatures(subscription.plan_type),
-      daysRemaining: Math.max(0, daysRemaining)
+      daysRemaining: Math.max(0, daysRemaining),
+      isExpired,
+      isCancelled
     };
   }
 

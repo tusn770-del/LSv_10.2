@@ -22,20 +22,31 @@ Deno.serve(async (req: Request) => {
       throw new Error('Payment method ID and customer ID are required');
     }
 
+    console.log('🔗 Attaching payment method:', { paymentMethodId, customerId });
+
     // Attach payment method to customer
-    await stripe.paymentMethods.attach(paymentMethodId, {
+    const attachedPaymentMethod = await stripe.paymentMethods.attach(paymentMethodId, {
       customer: customerId,
     });
 
+    console.log('✅ Payment method attached successfully:', attachedPaymentMethod.id);
+
     return new Response(
-      JSON.stringify({ success: true }),
+      JSON.stringify({ 
+        success: true,
+        paymentMethod: {
+          id: attachedPaymentMethod.id,
+          type: attachedPaymentMethod.type,
+          card: attachedPaymentMethod.card
+        }
+      }),
       {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 200,
       }
     );
   } catch (error) {
-    console.error('Error attaching payment method:', error);
+    console.error('❌ Error attaching payment method:', error);
     return new Response(
       JSON.stringify({ error: error.message }),
       {

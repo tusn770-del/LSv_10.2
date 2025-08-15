@@ -560,12 +560,14 @@ export const useDashboardData = (timeRange: string = '7d') => {
         setMonthlyTrends(cachedData.monthlyTrends);
         setNotifications(cachedData.notifications);
         setLoading(false);
+        console.log('📊 Dashboard data loaded from cache (tab switch)');
         return;
       }
     }
     
     // Fetch fresh data if no valid cache
     if (user) {
+      console.log('📊 Fetching fresh dashboard data...');
       fetchDashboardData();
     }
   }, [user, restaurant, timeRange, fetchDashboardData]);

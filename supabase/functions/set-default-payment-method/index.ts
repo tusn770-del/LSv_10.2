@@ -22,22 +22,32 @@ Deno.serve(async (req: Request) => {
       throw new Error('Payment method ID and customer ID are required');
     }
 
+    console.log('🎯 Setting default payment method:', { paymentMethodId, customerId });
+
     // Update customer's default payment method
-    await stripe.customers.update(customerId, {
+    const updatedCustomer = await stripe.customers.update(customerId, {
       invoice_settings: {
         default_payment_method: paymentMethodId,
       },
     });
 
+    console.log('✅ Default payment method updated successfully');
+
     return new Response(
-      JSON.stringify({ success: true }),
+      JSON.stringify({ 
+        success: true,
+        customer: {
+          id: updatedCustomer.id,
+          default_payment_method: updatedCustomer.invoice_settings?.default_payment_method
+        }
+      }),
       {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 200,
       }
     );
   } catch (error) {
-    console.error('Error setting default payment method:', error);
+    console.error('❌ Error setting default payment method:', error);
     return new Response(
       JSON.stringify({ error: error.message }),
       {

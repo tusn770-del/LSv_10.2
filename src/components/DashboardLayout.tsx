@@ -25,6 +25,7 @@ export default function DashboardLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [subscriptionData, setSubscriptionData] = useState<any>(null);
   const [subscriptionLoading, setSubscriptionLoading] = useState(false);
+  const [lastSubscriptionCheck, setLastSubscriptionCheck] = useState<number>(0);
   const navigate = useNavigate();
   const location = useLocation();
   const { user, signOut } = useAuth();
@@ -39,7 +40,7 @@ export default function DashboardLayout() {
   React.useEffect(() => {
     const handleSubscriptionUpdate = () => {
       console.log('🔄 Subscription update event received, refreshing...');
-      checkSubscription();
+      checkSubscription(true); // Force refresh
     };
 
     window.addEventListener('subscription-updated', handleSubscriptionUpdate);
@@ -56,20 +57,30 @@ export default function DashboardLayout() {
       
       // Trigger subscription refresh with delay to ensure backend processing
       setTimeout(() => {
-        checkSubscription();
+        checkSubscription(true); // Force refresh
         window.dispatchEvent(new CustomEvent('subscription-updated'));
       }, 1500);
     }
   }, []);
 
-  const checkSubscription = async () => {
+  const checkSubscription = async (forceRefresh: boolean = false) => {
     if (!user) return;
+    
+    // Check if we should use cached subscription data (15 minute cache)
+    const now = Date.now();
+    const SUBSCRIPTION_CACHE_DURATION = 15 * 60 * 1000; // 15 minutes
+    
+    if (!forceRefresh && subscriptionData && (now - lastSubscriptionCheck) < SUBSCRIPTION_CACHE_DURATION) {
+      console.log('📊 Using cached subscription data');
+      return;
+    }
     
     try {
       setSubscriptionLoading(true);
       const data = await SubscriptionService.checkSubscriptionAccess(user.id);
       console.log('📊 Subscription data loaded:', data);
       setSubscriptionData(data);
+      setLastSubscriptionCheck(now);
     } catch (error) {
       console.error('Error checking subscription:', error);
     } finally {

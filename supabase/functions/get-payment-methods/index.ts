@@ -22,15 +22,21 @@ Deno.serve(async (req: Request) => {
       throw new Error('Customer ID is required');
     }
 
+    console.log('🔍 Fetching payment methods for customer:', customerId);
+
     // Get payment methods for customer
     const paymentMethods = await stripe.paymentMethods.list({
       customer: customerId,
       type: 'card',
     });
 
+    console.log('💳 Found payment methods:', paymentMethods.data.length);
+
     // Get customer to check default payment method
-    const customer = await stripe.customers.retrieve(customerId);
+    const customer = await stripe.customers.retrieve(customerId) as Stripe.Customer;
     const defaultPaymentMethodId = customer.invoice_settings?.default_payment_method;
+
+    console.log('🎯 Default payment method ID:', defaultPaymentMethodId);
 
     // Format payment methods for frontend
     const formattedMethods = paymentMethods.data.map(pm => ({
@@ -45,6 +51,8 @@ Deno.serve(async (req: Request) => {
       is_default: pm.id === defaultPaymentMethodId
     }));
 
+    console.log('✅ Formatted payment methods:', formattedMethods);
+
     return new Response(
       JSON.stringify({ paymentMethods: formattedMethods }),
       {
@@ -53,7 +61,7 @@ Deno.serve(async (req: Request) => {
       }
     );
   } catch (error) {
-    console.error('Error fetching payment methods:', error);
+    console.error('❌ Error fetching payment methods:', error);
     return new Response(
       JSON.stringify({ error: error.message }),
       {

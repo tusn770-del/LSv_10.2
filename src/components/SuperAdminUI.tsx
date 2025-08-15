@@ -68,28 +68,33 @@ const SuperAdminUI: React.FC = () => {
       fetchMessages();
       
       // Subscribe to real-time message updates
-      const subscription = SupportService.subscribeToMessages(
+      const messageSubscription = SupportService.subscribeToMessages(
         selectedTicket.id,
         (payload) => {
           console.log('📨 Super Admin: Real-time message update:', payload);
-          if (payload.eventType === 'INSERT' && payload.new) {
+          if (payload.eventType === 'INSERT' && payload.new && payload.new.id) {
             setMessages(prev => {
               const exists = prev.some(msg => msg.id === payload.new.id);
               if (exists) return prev;
-              return [...prev, payload.new].sort((a, b) => 
+              const newMessages = [...prev, payload.new].sort((a, b) => 
                 new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
               );
+              console.log('📨 Super Admin: Added new message, total messages:', newMessages.length);
+              return newMessages;
             });
-          } else if (payload.eventType === 'UPDATE' && payload.new) {
+          } else if (payload.eventType === 'UPDATE' && payload.new && payload.new.id) {
             setMessages(prev => prev.map(msg => 
               msg.id === payload.new.id ? payload.new : msg
             ));
+          } else if (payload.eventType === 'DELETE' && payload.old && payload.old.id) {
+            setMessages(prev => prev.filter(msg => msg.id !== payload.old.id));
           }
         }
       );
 
       return () => {
-        subscription.unsubscribe();
+        console.log('🔌 Super Admin: Unsubscribing from messages for ticket:', selectedTicket.id);
+        messageSubscription.unsubscribe();
       };
     }
   }, [selectedTicket]);
@@ -170,6 +175,11 @@ const SuperAdminUI: React.FC = () => {
     try {
       setSendingMessage(true);
       
+      console.log('📤 Super Admin: Sending message:', {
+        ticketId: selectedTicket.id,
+        message: newMessage.trim()
+      });
+      
       await SupportService.sendMessage({
         ticket_id: selectedTicket.id,
         sender_type: 'super_admin',
@@ -177,6 +187,7 @@ const SuperAdminUI: React.FC = () => {
         message: newMessage
       });
 
+      console.log('✅ Super Admin: Message sent successfully');
       setNewMessage('');
       // Don't fetch messages manually - real-time subscription will handle it
     } catch (error) {
