@@ -19,7 +19,7 @@
 -- Create function to calculate subscription period end date
 CREATE OR REPLACE FUNCTION calculate_subscription_period_end(
   plan_type subscription_plan_type,
-  start_date timestamptz DEFAULT now()
+  period_start timestamptz DEFAULT now()
 )
 RETURNS timestamptz
 LANGUAGE plpgsql
@@ -29,15 +29,15 @@ DECLARE
 BEGIN
   CASE plan_type
     WHEN 'trial' THEN
-      end_date := start_date + interval '30 days';
+      end_date := period_start + interval '30 days';
     WHEN 'monthly' THEN
-      end_date := start_date + interval '30 days';
+      end_date := period_start + interval '30 days';
     WHEN 'semiannual' THEN
-      end_date := start_date + interval '6 months';
+      end_date := period_start + interval '6 months';
     WHEN 'annual' THEN
-      end_date := start_date + interval '1 year';
+      end_date := period_start + interval '1 year';
     ELSE
-      end_date := start_date + interval '30 days';
+      end_date := period_start + interval '30 days';
   END CASE;
   
   RETURN end_date;
