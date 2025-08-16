@@ -25,9 +25,9 @@ Deno.serve(async (req: Request) => {
     console.log('🗑️ Detaching payment method:', paymentMethodId);
 
     // Detach payment method from customer
-    const detachedPaymentMethod = await stripe.paymentMethods.detach(paymentMethodId);
+    await stripe.paymentMethods.detach(paymentMethodId);
 
-    console.log('✅ Payment method detached successfully:', detachedPaymentMethod.id);
+    console.log('✅ Payment method detached successfully:', paymentMethodId);
 
     return new Response(
       JSON.stringify({ success: true }),

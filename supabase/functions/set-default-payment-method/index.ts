@@ -25,7 +25,7 @@ Deno.serve(async (req: Request) => {
     console.log('🎯 Setting default payment method:', { paymentMethodId, customerId });
 
     // Update customer's default payment method
-    const updatedCustomer = await stripe.customers.update(customerId, {
+    await stripe.customers.update(customerId, {
       invoice_settings: {
         default_payment_method: paymentMethodId,
       },
@@ -34,13 +34,7 @@ Deno.serve(async (req: Request) => {
     console.log('✅ Default payment method updated successfully');
 
     return new Response(
-      JSON.stringify({ 
-        success: true,
-        customer: {
-          id: updatedCustomer.id,
-          default_payment_method: updatedCustomer.invoice_settings?.default_payment_method
-        }
-      }),
+      JSON.stringify({ success: true }),
       {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 200,

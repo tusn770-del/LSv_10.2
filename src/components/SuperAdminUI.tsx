@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Users, Building, DollarSign, TrendingUp, BarChart3, 
   Search, Filter, Eye, MoreVertical, RefreshCw, AlertCircle,
@@ -35,6 +35,17 @@ const SuperAdminUI: React.FC = () => {
   const [sendingMessage, setSendingMessage] = useState(false);
   const [ticketSearch, setTicketSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const subscriptionRef = useRef<any>(null);
+
+  // Auto-scroll to bottom when new messages arrive
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
 
   // Check authentication
   useEffect(() => {
@@ -66,38 +77,52 @@ const SuperAdminUI: React.FC = () => {
   useEffect(() => {
     if (selectedTicket) {
       fetchMessages();
-      
-      // Subscribe to real-time message updates
-      const messageSubscription = SupportService.subscribeToMessages(
-        selectedTicket.id,
-        (payload) => {
-          console.log('📨 Super Admin: Real-time message update:', payload);
-          if (payload.eventType === 'INSERT' && payload.new && payload.new.id) {
-            setMessages(prev => {
-              const exists = prev.some(msg => msg.id === payload.new.id);
-              if (exists) return prev;
-              const newMessages = [...prev, payload.new].sort((a, b) => 
-                new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-              );
-              console.log('📨 Super Admin: Added new message, total messages:', newMessages.length);
-              return newMessages;
-            });
-          } else if (payload.eventType === 'UPDATE' && payload.new && payload.new.id) {
-            setMessages(prev => prev.map(msg => 
-              msg.id === payload.new.id ? payload.new : msg
-            ));
-          } else if (payload.eventType === 'DELETE' && payload.old && payload.old.id) {
-            setMessages(prev => prev.filter(msg => msg.id !== payload.old.id));
-          }
-        }
-      );
-
-      return () => {
-        console.log('🔌 Super Admin: Unsubscribing from messages for ticket:', selectedTicket.id);
-        messageSubscription.unsubscribe();
-      };
+      setupMessageSubscription();
     }
+    
+    return () => {
+      if (subscriptionRef.current) {
+        console.log('🔌 Super Admin: Cleaning up message subscription');
+        subscriptionRef.current.unsubscribe();
+        subscriptionRef.current = null;
+      }
+    };
   }, [selectedTicket]);
+
+  const setupMessageSubscription = () => {
+    if (!selectedTicket) return;
+    
+    // Clean up existing subscription
+    if (subscriptionRef.current) {
+      subscriptionRef.current.unsubscribe();
+    }
+    
+    console.log('🔌 Super Admin: Setting up message subscription for ticket:', selectedTicket.id);
+    
+    subscriptionRef.current = SupportService.subscribeToMessages(
+      selectedTicket.id,
+      (payload) => {
+        console.log('📨 Super Admin: Real-time message update:', payload);
+        
+        if (payload.eventType === 'INSERT' && payload.new) {
+          setMessages(prev => {
+            // Check if message already exists
+            const exists = prev.some(msg => msg.id === payload.new.id);
+            if (exists) {
+              console.log('📨 Super Admin: Message already exists, skipping');
+              return prev;
+            }
+            
+            console.log('📨 Super Admin: Adding new message:', payload.new);
+            const newMessages = [...prev, payload.new].sort((a, b) => 
+              new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+            );
+            return newMessages;
+          });
+        }
+      }
+    );
+  };
 
   const loadDashboardData = async () => {
     try {
@@ -180,18 +205,38 @@ const SuperAdminUI: React.FC = () => {
         message: newMessage.trim()
       });
       
+      // Optimistically add message to UI
+      const optimisticMessage: SupportMessage = {
+        id: `temp-${Date.now()}`,
+        ticket_id: selectedTicket.id,
+        sender_type: 'super_admin',
+        sender_id: 'super_admin',
+        message: newMessage.trim(),
+        created_at: new Date().toISOString()
+      };
+      
+      setMessages(prev => [...prev, optimisticMessage]);
+      setNewMessage('');
+      
       await SupportService.sendMessage({
         ticket_id: selectedTicket.id,
         sender_type: 'super_admin',
         sender_id: 'super_admin',
-        message: newMessage
+        message: newMessage.trim()
       });
 
       console.log('✅ Super Admin: Message sent successfully');
-      setNewMessage('');
-      // Don't fetch messages manually - real-time subscription will handle it
+      
+      // Remove optimistic message and let real-time subscription handle the real one
+      setTimeout(() => {
+        setMessages(prev => prev.filter(msg => !msg.id.startsWith('temp-')));
+      }, 1000);
+      
     } catch (error) {
       console.error('Error sending message:', error);
+      // Remove optimistic message on error
+      setMessages(prev => prev.filter(msg => !msg.id.startsWith('temp-')));
+      setNewMessage(newMessage); // Restore message
       alert('Failed to send message');
     } finally {
       setSendingMessage(false);
@@ -744,7 +789,13 @@ const SuperAdminUI: React.FC = () => {
                             <option value="closed">Closed</option>
                           </select>
                           <button
-                            onClick={() => setSelectedTicket(null)}
+                            onClick={() => {
+                              setSelectedTicket(null);
+                              if (subscriptionRef.current) {
+                                subscriptionRef.current.unsubscribe();
+                                subscriptionRef.current = null;
+                              }
+                            }}
                             className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
                           >
                             <X className="h-4 w-4" />
@@ -778,6 +829,7 @@ const SuperAdminUI: React.FC = () => {
                           </div>
                         </div>
                       ))}
+                      <div ref={messagesEndRef} />
                     </div>
 
                     {/* Message Input */}

@@ -169,8 +169,8 @@ const SubscriptionGuard: React.FC<SubscriptionGuardProps> = ({ children, require
     );
   }
 
-  // Show expired subscription message
-  if (subscriptionData && !subscriptionData.hasAccess) {
+  // Show expired subscription message only if truly expired (not just cancelled)
+  if (subscriptionData && !subscriptionData.hasAccess && subscriptionData.isExpired) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
         <motion.div
@@ -182,7 +182,7 @@ const SubscriptionGuard: React.FC<SubscriptionGuardProps> = ({ children, require
             <AlertTriangle className="h-8 w-8 text-red-600" />
           </div>
           <h3 className="text-xl font-bold text-gray-900 mb-2 font-['Space_Grotesk']">
-            Subscription Required
+            Subscription Expired
           </h3>
           <p className="text-gray-600 mb-6">
             Your subscription has expired. Please upgrade to continue using Voya.
@@ -191,10 +191,37 @@ const SubscriptionGuard: React.FC<SubscriptionGuardProps> = ({ children, require
             onClick={handleUpgrade}
             className="w-full py-3 px-4 bg-gradient-to-r from-[#E6A85C] via-[#E85A9B] to-[#D946EF] text-white rounded-xl hover:shadow-lg transition-all duration-200 flex items-center justify-center gap-2"
           >
-            Upgrade Subscription
+            Renew Subscription
             <ArrowRight className="h-4 w-4" />
           </button>
         </motion.div>
+      </div>
+    );
+  }
+
+  // Show cancelled but still active subscription notice
+  if (subscriptionData?.isCancelled && subscriptionData?.hasAccess && !subscriptionData?.isExpired) {
+    return (
+      <div className="min-h-screen bg-gray-50">
+        {/* Cancellation Notice Banner */}
+        <div className="bg-gradient-to-r from-orange-400 to-red-500 text-white p-4">
+          <div className="max-w-7xl mx-auto flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <AlertTriangle className="h-5 w-5" />
+              <span className="font-medium">
+                Subscription cancelled. Access continues until {new Date(subscriptionData.subscription.current_period_end).toLocaleDateString()}
+              </span>
+            </div>
+            <button
+              onClick={handleUpgrade}
+              className="bg-white text-gray-900 px-4 py-2 rounded-lg font-medium hover:bg-gray-100 transition-colors flex items-center gap-2"
+            >
+              Reactivate
+              <ArrowRight className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+        {children}
       </div>
     );
   }

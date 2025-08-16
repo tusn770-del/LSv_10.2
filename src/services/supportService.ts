@@ -188,12 +188,12 @@ export class SupportService {
 
   // Subscribe to real-time updates for messages
   static subscribeToMessages(ticketId: string, callback: (payload: any) => void) {
-    console.log('🔌 Subscribing to messages for ticket:', ticketId);
+    console.log('🔌 Setting up message subscription for ticket:', ticketId);
     
-    const channelName = `support_messages_${ticketId}_${Date.now()}`;
+    const channelName = `messages_${ticketId}`;
     console.log('📡 Creating channel:', channelName);
     
-    return supabase
+    const subscription = supabase
       .channel(channelName)
       .on('postgres_changes', 
         { 
@@ -203,7 +203,6 @@ export class SupportService {
           filter: `ticket_id=eq.${ticketId}`
         }, 
         (payload) => {
-          console.log('📨 Raw message subscription payload:', {
             ticketId,
             eventType: payload.eventType,
             new: payload.new,
@@ -219,12 +218,15 @@ export class SupportService {
         }
       )
       .subscribe((status) => {
-        console.log('📡 Message subscription status:', {
+        console.log('📡 Subscription status for ticket:', {
           ticketId,
           channel: channelName,
           status,
           timestamp: new Date().toISOString()
         });
       });
+    
+    console.log('✅ Message subscription created for ticket:', ticketId);
+    return subscription;
   }
 }

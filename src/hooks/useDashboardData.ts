@@ -84,14 +84,17 @@ export const useDashboardData = (timeRange: string = '7d') => {
   const [error, setError] = useState<string | null>(null);
   const { user, restaurant } = useAuth();
 
+  // Track last fetch times for each tab
+  const [lastFetchTimes, setLastFetchTimes] = useState<Map<string, number>>(new Map());
+  const CACHE_DURATION = 15 * 60 * 1000; // 15 minutes
+
   // Check if we should use cached data (for tab switching)
-  const shouldUseCachedData = (cacheKey: string, isTabSwitch: boolean = false) => {
+  const shouldUseCachedData = (cacheKey: string) => {
     const cached = dataCache.get(cacheKey);
     if (!cached) return false;
     
     const now = Date.now();
-    const cacheThreshold = isTabSwitch ? TAB_CACHE_DURATION : CACHE_DURATION;
-    return (now - cached.timestamp) < cacheThreshold;
+    return (now - cached.timestamp) < CACHE_DURATION;
   };
 
   // Store data in cache

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   MessageSquare, Plus, Search, Filter, Clock, CheckCircle,
   AlertCircle, User, Send, X, ChevronDown, ChevronUp,
@@ -26,8 +26,19 @@ const SupportUI: React.FC = () => {
     category: 'general'
   });
   const [createLoading, setCreateLoading] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const subscriptionRef = useRef<any>(null);
 
   const { user, restaurant } = useAuth();
+
+  // Auto-scroll to bottom when new messages arrive
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
 
   useEffect(() => {
     if (restaurant) {
@@ -38,39 +49,52 @@ const SupportUI: React.FC = () => {
   useEffect(() => {
     if (selectedTicket) {
       fetchMessages();
-      
-      // Subscribe to real-time message updates
-      const messageSubscription = SupportService.subscribeToMessages(
-        selectedTicket.id,
-        (payload) => {
-          console.log('📨 Real-time message update:', payload);
-          if (payload.eventType === 'INSERT' && payload.new && payload.new.id) {
-            setMessages(prev => {
-              // Avoid duplicates
-              const exists = prev.some(msg => msg.id === payload.new.id);
-              if (exists) return prev;
-              const newMessages = [...prev, payload.new].sort((a, b) => 
-                new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-              );
-              console.log('📨 Added new message, total messages:', newMessages.length);
-              return newMessages;
-            });
-          } else if (payload.eventType === 'UPDATE' && payload.new && payload.new.id) {
-            setMessages(prev => prev.map(msg => 
-              msg.id === payload.new.id ? payload.new : msg
-            ));
-          } else if (payload.eventType === 'DELETE' && payload.old && payload.old.id) {
-            setMessages(prev => prev.filter(msg => msg.id !== payload.old.id));
-          }
-        }
-      );
-
-      return () => {
-        console.log('🔌 Unsubscribing from messages for ticket:', selectedTicket.id);
-        messageSubscription.unsubscribe();
-      };
+      setupMessageSubscription();
     }
+    
+    return () => {
+      if (subscriptionRef.current) {
+        console.log('🔌 Cleaning up message subscription');
+        subscriptionRef.current.unsubscribe();
+        subscriptionRef.current = null;
+      }
+    };
   }, [selectedTicket]);
+
+  const setupMessageSubscription = () => {
+    if (!selectedTicket) return;
+    
+    // Clean up existing subscription
+    if (subscriptionRef.current) {
+      subscriptionRef.current.unsubscribe();
+    }
+    
+    console.log('🔌 Setting up message subscription for ticket:', selectedTicket.id);
+    
+    subscriptionRef.current = SupportService.subscribeToMessages(
+      selectedTicket.id,
+      (payload) => {
+        console.log('📨 Real-time message update:', payload);
+        
+        if (payload.eventType === 'INSERT' && payload.new) {
+          setMessages(prev => {
+            // Check if message already exists
+            const exists = prev.some(msg => msg.id === payload.new.id);
+            if (exists) {
+              console.log('📨 Message already exists, skipping');
+              return prev;
+            }
+            
+            console.log('📨 Adding new message:', payload.new);
+            const newMessages = [...prev, payload.new].sort((a, b) => 
+              new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+            );
+            return newMessages;
+          });
+        }
+      }
+    );
+  };
 
   const fetchTickets = async () => {
     if (!restaurant) return;
@@ -147,18 +171,38 @@ const SupportUI: React.FC = () => {
         userId: user.id
       });
       
+      // Optimistically add message to UI
+      const optimisticMessage: SupportMessage = {
+        id: `temp-${Date.now()}`,
+        ticket_id: selectedTicket.id,
+        sender_type: 'restaurant_manager',
+        sender_id: user.id,
+        message: newMessage.trim(),
+        created_at: new Date().toISOString()
+      };
+      
+      setMessages(prev => [...prev, optimisticMessage]);
+      setNewMessage('');
+      
       await SupportService.sendMessage({
         ticket_id: selectedTicket.id,
         sender_type: 'restaurant_manager',
         sender_id: user.id,
-        message: newMessage
+        message: newMessage.trim()
       });
 
       console.log('✅ Message sent successfully');
-      setNewMessage('');
-      // Don't fetch messages manually - real-time subscription will handle it
+      
+      // Remove optimistic message and let real-time subscription handle the real one
+      setTimeout(() => {
+        setMessages(prev => prev.filter(msg => !msg.id.startsWith('temp-')));
+      }, 1000);
+      
     } catch (error) {
       console.error('Error sending message:', error);
+      // Remove optimistic message on error
+      setMessages(prev => prev.filter(msg => !msg.id.startsWith('temp-')));
+      setNewMessage(newMessage); // Restore message
       alert('Failed to send message');
     } finally {
       setSendingMessage(false);
@@ -336,7 +380,13 @@ const SupportUI: React.FC = () => {
                     </div>
                   </div>
                   <button
-                    onClick={() => setSelectedTicket(null)}
+                    onClick={() => {
+                      setSelectedTicket(null);
+                      if (subscriptionRef.current) {
+                        subscriptionRef.current.unsubscribe();
+                        subscriptionRef.current = null;
+                      }
+                    }}
                     className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
                   >
                     <X className="h-4 w-4" />
@@ -370,6 +420,7 @@ const SupportUI: React.FC = () => {
                     </div>
                   </div>
                 ))}
+                <div ref={messagesEndRef} />
               </div>
 
               {/* Message Input */}
@@ -515,4 +566,4 @@ const SupportUI: React.FC = () => {
   );
 };
 
-export default SupportUI; 
+export default SupportUI;

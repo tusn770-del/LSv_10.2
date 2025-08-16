@@ -26,6 +26,7 @@ export default function DashboardLayout() {
   const [subscriptionData, setSubscriptionData] = useState<any>(null);
   const [subscriptionLoading, setSubscriptionLoading] = useState(false);
   const [lastSubscriptionCheck, setLastSubscriptionCheck] = useState<number>(0);
+  const [showUpgradeSuccess, setShowUpgradeSuccess] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const { user, signOut } = useAuth();
@@ -40,7 +41,9 @@ export default function DashboardLayout() {
   React.useEffect(() => {
     const handleSubscriptionUpdate = () => {
       console.log('🔄 Subscription update event received, refreshing...');
-      checkSubscription(true); // Force refresh
+      checkSubscription(true);
+      setShowUpgradeSuccess(true);
+      setTimeout(() => setShowUpgradeSuccess(false), 5000);
     };
 
     window.addEventListener('subscription-updated', handleSubscriptionUpdate);
