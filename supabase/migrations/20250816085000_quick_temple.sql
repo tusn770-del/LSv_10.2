@@ -19,7 +19,7 @@
 -- Create function to calculate subscription period end date
 CREATE OR REPLACE FUNCTION calculate_subscription_period_end(
   plan_type subscription_plan_type,
-  period_start timestamptz DEFAULT now()
+  period_start timestamptz DEFAULT now() 
 )
 RETURNS timestamptz
 LANGUAGE plpgsql
