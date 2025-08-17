@@ -38,27 +38,22 @@ export class SubscriptionService {
         return await this.updateSubscription(existingSubscription.id, planType, stripeSubscriptionId, stripeCustomerId);
       }
 
-      // Calculate period dates based on plan type
+      // Use database function for accurate period calculation
       const now = new Date();
       const periodStart = now.toISOString();
-      let periodEnd: Date;
-
-      switch (planType) {
-        case 'trial':
-          periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // 30 days
-          break;
-        case 'monthly':
-          periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // 30 days
-          break;
-        case 'semiannual':
-          periodEnd = new Date(now.getTime() + 6 * 30 * 24 * 60 * 60 * 1000); // 6 months (180 days)
-          break;
-        case 'annual':
-          periodEnd = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000); // 1 year (365 days)
-          break;
-        default:
-          periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+      
+      // Get accurate period end from database function
+      const { data: periodEndData, error: periodError } = await supabase.rpc('calculate_subscription_period_end', {
+        plan_type: planType,
+        period_start: periodStart
+      });
+      
+      if (periodError) {
+        console.error('Error calculating period end:', periodError);
+        throw new Error('Failed to calculate subscription period');
       }
+      
+      const periodEnd = periodEndData;
 
       // If existing subscription found, update it instead
       if (existingSubscription) {
@@ -70,7 +65,7 @@ export class SubscriptionService {
             stripe_subscription_id: stripeSubscriptionId,
             stripe_customer_id: stripeCustomerId,
             current_period_start: periodStart,
-            current_period_end: periodEnd.toISOString(),
+            current_period_end: periodEnd,
             updated_at: new Date().toISOString()
           })
           .eq('id', existingSubscription.id)
@@ -95,7 +90,7 @@ export class SubscriptionService {
           stripe_subscription_id: stripeSubscriptionId,
           stripe_customer_id: stripeCustomerId,
           current_period_start: periodStart,
-          current_period_end: periodEnd.toISOString()
+          current_period_end: periodEnd
         })
         .select()
         .single();
@@ -121,23 +116,16 @@ export class SubscriptionService {
     try {
       const now = new Date();
       const periodStart = now.toISOString();
-      let periodEnd: Date;
-
-      switch (planType) {
-        case 'trial':
-          periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-          break;
-        case 'monthly':
-          periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-          break;
-        case 'semiannual':
-          periodEnd = new Date(now.getTime() + 6 * 30 * 24 * 60 * 60 * 1000); // 6 months
-          break;
-        case 'annual':
-          periodEnd = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000); // 1 year
-          break;
-        default:
-          periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+      
+      // Get accurate period end from database function
+      const { data: periodEndData, error: periodError } = await supabase.rpc('calculate_subscription_period_end', {
+        plan_type: planType,
+        period_start: periodStart
+      });
+      
+      if (periodError) {
+        console.error('Error calculating period end:', periodError);
+        throw new Error('Failed to calculate subscription period');
       }
 
       const { data, error } = await supabase
@@ -148,7 +136,7 @@ export class SubscriptionService {
           stripe_subscription_id: stripeSubscriptionId,
           stripe_customer_id: stripeCustomerId,
           current_period_start: periodStart,
-          current_period_end: periodEnd.toISOString(),
+          current_period_end: periodEndData,
           updated_at: now.toISOString()
         })
         .eq('id', subscriptionId)
@@ -165,20 +153,27 @@ export class SubscriptionService {
 
   static async getUserSubscription(userId: string): Promise<Subscription | null> {
     try {
-      const { data, error } = await supabase
-        .from('subscriptions')
-        .select('*')
-        .eq('user_id', userId)
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      // Use the new database function for accurate subscription data
+      const { data, error } = await supabase.rpc('get_subscription_with_periods', {
+        user_id_param: userId
+      });
 
-      if (error && error.code !== 'PGRST116') {
+      if (error) {
         console.error('Error fetching subscription:', error);
-        return null;
+        // Fallback to basic query
+        const { data: fallbackData, error: fallbackError } = await supabase
+          .from('subscriptions')
+          .select('*')
+          .eq('user_id', userId)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        
+        if (fallbackError) return null;
+        return fallbackData;
       }
       
-      return data;
+      return data && data.length > 0 ? data[0] : null;
     } catch (error: any) {
       console.error('Error fetching user subscription:', error);
       return null;
@@ -238,6 +233,7 @@ export class SubscriptionService {
     daysRemaining?: number;
     isExpired?: boolean;
     isCancelled?: boolean;
+    billingPeriodText?: string;
   } {
     if (!subscription) {
       return {
@@ -246,7 +242,8 @@ export class SubscriptionService {
         features: this.getTrialFeatures(),
         daysRemaining: 30,
         isExpired: false,
-        isCancelled: false
+        isCancelled: false,
+        billingPeriodText: 'No active subscription'
       };
     }
 
@@ -259,14 +256,30 @@ export class SubscriptionService {
     const hasAccess = (subscription.status === 'active' || (isCancelled && !isExpired)) && endDate > now;
     const daysRemaining = Math.ceil((endDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
 
+    // Generate proper billing period text
+    const startDate = new Date(subscription.current_period_start);
+    const planDurationText = this.getPlanDurationText(subscription.plan_type);
+    const billingPeriodText = `${startDate.toLocaleDateString('en-US')} – ${endDate.toLocaleDateString('en-US')} (${planDurationText})`;
+
     return {
       hasAccess,
       subscription,
       features: this.getPlanFeatures(subscription.plan_type),
       daysRemaining: Math.max(0, daysRemaining),
       isExpired,
-      isCancelled
+      isCancelled,
+      billingPeriodText
     };
+  }
+
+  private static getPlanDurationText(planType: string): string {
+    switch (planType) {
+      case 'trial': return '30 days';
+      case 'monthly': return '1 month';
+      case 'semiannual': return '6 months';
+      case 'annual': return '1 year';
+      default: return 'unknown';
+    }
   }
 
   static getPlanFeatures(planType: 'trial' | 'monthly' | 'semiannual' | 'annual'): PlanFeatures {

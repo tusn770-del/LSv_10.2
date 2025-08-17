@@ -27,13 +27,16 @@ const SupportUI: React.FC = () => {
   });
   const [createLoading, setCreateLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const subscriptionRef = useRef<any>(null);
+  const messageSubscriptionRef = useRef<any>(null);
+  const ticketSubscriptionRef = useRef<any>(null);
 
   const { user, restaurant } = useAuth();
 
   // Auto-scroll to bottom when new messages arrive
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    setTimeout(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, 100);
   };
 
   useEffect(() => {
@@ -43,42 +46,89 @@ const SupportUI: React.FC = () => {
   useEffect(() => {
     if (restaurant) {
       fetchTickets();
+      setupTicketSubscription();
     }
+    
+    return () => {
+      cleanupSubscriptions();
+    };
   }, [restaurant]);
 
   useEffect(() => {
     if (selectedTicket) {
       fetchMessages();
       setupMessageSubscription();
+    } else {
+      cleanupMessageSubscription();
     }
-    
-    return () => {
-      if (subscriptionRef.current) {
-        console.log('🔌 Cleaning up message subscription');
-        subscriptionRef.current.unsubscribe();
-        subscriptionRef.current = null;
-      }
-    };
   }, [selectedTicket]);
+
+  const cleanupSubscriptions = () => {
+    cleanupMessageSubscription();
+    cleanupTicketSubscription();
+  };
+
+  const cleanupMessageSubscription = () => {
+    if (messageSubscriptionRef.current) {
+      console.log('🔌 Cleaning up message subscription');
+      messageSubscriptionRef.current.unsubscribe();
+      messageSubscriptionRef.current = null;
+    }
+  };
+
+  const cleanupTicketSubscription = () => {
+    if (ticketSubscriptionRef.current) {
+      console.log('🔌 Cleaning up ticket subscription');
+      ticketSubscriptionRef.current.unsubscribe();
+      ticketSubscriptionRef.current = null;
+    }
+  };
+
+  const setupTicketSubscription = () => {
+    if (!restaurant) return;
+    
+    cleanupTicketSubscription();
+    
+    console.log('🔌 Setting up ticket subscription for restaurant:', restaurant.id);
+    
+    ticketSubscriptionRef.current = SupportService.subscribeToTickets((payload) => {
+      console.log('🎫 Real-time ticket update:', payload);
+      
+      if (payload.eventType === 'INSERT' && payload.new) {
+        // Only add tickets for this restaurant
+        if (payload.new.restaurant_id === restaurant.id) {
+          setTickets(prev => {
+            const exists = prev.some(ticket => ticket.id === payload.new.id);
+            if (exists) return prev;
+            
+            return [payload.new, ...prev].sort((a, b) => 
+              new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+            );
+          });
+        }
+      } else if (payload.eventType === 'UPDATE' && payload.new) {
+        setTickets(prev => prev.map(ticket => 
+          ticket.id === payload.new.id ? payload.new : ticket
+        ));
+      }
+    });
+  };
 
   const setupMessageSubscription = () => {
     if (!selectedTicket) return;
     
-    // Clean up existing subscription
-    if (subscriptionRef.current) {
-      subscriptionRef.current.unsubscribe();
-    }
+    cleanupMessageSubscription();
     
     console.log('🔌 Setting up message subscription for ticket:', selectedTicket.id);
     
-    subscriptionRef.current = SupportService.subscribeToMessages(
+    messageSubscriptionRef.current = SupportService.subscribeToMessages(
       selectedTicket.id,
       (payload) => {
         console.log('📨 Real-time message update:', payload);
         
         if (payload.eventType === 'INSERT' && payload.new) {
           setMessages(prev => {
-            // Check if message already exists
+            // Check if message already exists (prevent duplicates)
             const exists = prev.some(msg => msg.id === payload.new.id);
             if (exists) {
               console.log('📨 Message already exists, skipping');
@@ -171,9 +221,9 @@ const SupportUI: React.FC = () => {
         userId: user.id
       });
       
-      // Optimistically add message to UI
+      // Create optimistic message for immediate UI update
       const optimisticMessage: SupportMessage = {
-        id: `temp-${Date.now()}`,
+        id: `optimistic-${Date.now()}`,
         ticket_id: selectedTicket.id,
         sender_type: 'restaurant_manager',
         sender_id: user.id,
@@ -181,28 +231,31 @@ const SupportUI: React.FC = () => {
         created_at: new Date().toISOString()
       };
       
+      // Add optimistic message immediately
       setMessages(prev => [...prev, optimisticMessage]);
-      setNewMessage('');
+      const messageToSend = newMessage.trim();
+      setNewMessage(''); // Clear input immediately
       
+      // Send actual message
       await SupportService.sendMessage({
         ticket_id: selectedTicket.id,
         sender_type: 'restaurant_manager',
         sender_id: user.id,
-        message: newMessage.trim()
+        message: messageToSend
       });
 
       console.log('✅ Message sent successfully');
       
-      // Remove optimistic message and let real-time subscription handle the real one
+      // Remove optimistic message after a delay (real message will come via subscription)
       setTimeout(() => {
-        setMessages(prev => prev.filter(msg => !msg.id.startsWith('temp-')));
-      }, 1000);
+        setMessages(prev => prev.filter(msg => !msg.id.startsWith('optimistic-')));
+      }, 2000);
       
     } catch (error) {
       console.error('Error sending message:', error);
-      // Remove optimistic message on error
-      setMessages(prev => prev.filter(msg => !msg.id.startsWith('temp-')));
-      setNewMessage(newMessage); // Restore message
+      // Remove optimistic message and restore input on error
+      setMessages(prev => prev.filter(msg => !msg.id.startsWith('optimistic-')));
+      setNewMessage(messageToSend);
       alert('Failed to send message');
     } finally {
       setSendingMessage(false);
@@ -382,10 +435,7 @@ const SupportUI: React.FC = () => {
                   <button
                     onClick={() => {
                       setSelectedTicket(null);
-                      if (subscriptionRef.current) {
-                        subscriptionRef.current.unsubscribe();
-                        subscriptionRef.current = null;
-                      }
+                      cleanupMessageSubscription();
                     }}
                     className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
                   >
@@ -400,20 +450,20 @@ const SupportUI: React.FC = () => {
               </div>
 
               {/* Messages */}
-              <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
                 {messages.map((message) => (
                   <div
                     key={message.id}
                     className={`flex ${message.sender_type === 'restaurant_manager' ? 'justify-end' : 'justify-start'}`}
                   >
-                    <div className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${
+                    <div className={`max-w-xs lg:max-w-md px-4 py-3 rounded-2xl ${
                       message.sender_type === 'restaurant_manager'
-                        ? 'bg-[#1E2A78] text-white'
-                        : 'bg-gray-200 text-gray-900'
+                        ? 'bg-gradient-to-r from-[#E6A85C] to-[#E85A9B] text-white'
+                        : 'bg-gray-100 text-gray-900'
                     }`}>
-                      <p className="text-sm">{message.message}</p>
-                      <p className={`text-xs mt-1 ${
-                        message.sender_type === 'restaurant_manager' ? 'text-blue-200' : 'text-gray-500'
+                      <p className="text-sm leading-relaxed">{message.message}</p>
+                      <p className={`text-xs mt-2 ${
+                        message.sender_type === 'restaurant_manager' ? 'text-white/70' : 'text-gray-500'
                       }`}>
                         {formatDate(message.created_at)}
                       </p>
@@ -430,14 +480,20 @@ const SupportUI: React.FC = () => {
                     type="text"
                     value={newMessage}
                     onChange={(e) => setNewMessage(e.target.value)}
-                    onKeyPress={(e) => e.key === 'Enter' && !sendingMessage && handleSendMessage()}
+                    onKeyPress={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey && !sendingMessage) {
+                        e.preventDefault();
+                        handleSendMessage();
+                      }
+                    }}
                     placeholder="Type your message..."
-                    className="flex-1 px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#E6A85C] focus:border-transparent"
+                    className="flex-1 px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-[#E6A85C] focus:border-transparent"
+                    disabled={sendingMessage}
                   />
                   <button
                     onClick={handleSendMessage}
                     disabled={sendingMessage || !newMessage.trim()}
-                    className="px-4 py-2 bg-gradient-to-r from-[#E6A85C] via-[#E85A9B] to-[#D946EF] text-white rounded-lg hover:shadow-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                    className="px-6 py-3 bg-gradient-to-r from-[#E6A85C] via-[#E85A9B] to-[#D946EF] text-white rounded-xl hover:shadow-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                   >
                     {sendingMessage ? (
                       <Loader2 className="h-4 w-4 animate-spin" />

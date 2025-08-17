@@ -418,35 +418,32 @@ const BillingPage: React.FC = () => {
   const getBillingPeriodText = () => {
     if (!subscription?.subscription) return 'N/A';
     
-    const plan = subscription.subscription.plan_type;
+    // Use the billing period text from subscription data if available
+    if (subscription.billingPeriodText) {
+      return subscription.billingPeriodText;
+    }
+    
+    // Fallback calculation
     const startDate = subscription.subscription.current_period_start;
     const endDate = subscription.subscription.current_period_end;
     
     if (!startDate || !endDate) return 'N/A';
     
-    const start = new Date(startDate).toLocaleDateString();
-    const end = new Date(endDate).toLocaleDateString();
+    const start = new Date(startDate).toLocaleDateString('en-US');
+    const end = new Date(endDate).toLocaleDateString('en-US');
+    const planDuration = getPlanDurationText(subscription.subscription.plan_type);
     
-    // Get the correct period label based on plan type
-    let periodLabel = '';
-    switch (plan) {
-      case 'annual':
-        periodLabel = '1 year';
-        break;
-      case 'semiannual':
-        periodLabel = '6 months';
-        break;
-      case 'monthly':
-        periodLabel = '1 month';
-        break;
-      case 'trial':
-        periodLabel = 'trial period';
-        break;
-      default:
-        periodLabel = 'unknown';
+    return `${start} – ${end} (${planDuration})`;
+  };
+
+  const getPlanDurationText = (planType: string) => {
+    switch (planType) {
+      case 'trial': return '30 days';
+      case 'monthly': return '1 month';
+      case 'semiannual': return '6 months';
+      case 'annual': return '1 year';
+      default: return 'unknown';
     }
-    
-    return `${start} - ${end} (${periodLabel})`;
   };
 
   const getNextBillingInfo = () => {
