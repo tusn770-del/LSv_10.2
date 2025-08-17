@@ -1,193 +1,207 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import Stripe from "npm:stripe@18.4.0";
 import { createClient } from "npm:@supabase/supabase-js@2.53.0";
-
-const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
-  apiVersion: "2024-06-20",
-});
-
-const supabase = createClient(
-  Deno.env.get("SUPABASE_URL")!,
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-);
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, stripe-signature",
 };
 
-serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+// Helper function to calculate period_end based on plan type
+function calculatePeriodEnd(start: string, planType: 'monthly' | 'semiannual' | 'annual') {
+  const date = new Date(start);
+  switch (planType) {
+    case 'monthly':
+      date.setMonth(date.getMonth() + 1);
+      break;
+    case 'semiannual':
+      date.setMonth(date.getMonth() + 6);
+      break;
+    case 'annual':
+      date.setFullYear(date.getFullYear() + 1);
+      break;
+  }
+  return date.toISOString();
+}
 
-  const signature = req.headers.get("stripe-signature");
-  if (!signature) return new Response("Missing signature", { status: 400 });
-
-  const body = await req.text();
-  let event: Stripe.Event;
-
-  try {
-    event = stripe.webhooks.constructEvent(
-      body,
-      signature,
-      Deno.env.get("STRIPE_WEBHOOK_SECRET")!
-    );
-  } catch (err) {
-    console.error("Webhook signature verification failed.", err.message);
-    return new Response(`Webhook Error: ${err.message}`, { status: 400 });
+Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 200, headers: corsHeaders });
   }
 
   try {
+    const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY') || '', {
+      apiVersion: '2023-10-16',
+    });
+
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    );
+
+    const signature = req.headers.get('stripe-signature');
+    const body = await req.text();
+
+    if (!signature) {
+      console.error('❌ No Stripe signature found');
+      return new Response('No signature', { status: 400 });
+    }
+
+    const webhookSecret = Deno.env.get('STRIPE_WEBHOOK_SECRET');
+    if (!webhookSecret) {
+      console.error('❌ No webhook secret configured');
+      return new Response('Webhook secret not configured', { status: 500 });
+    }
+
+    const event = await stripe.webhooks.constructEventAsync(body, signature, webhookSecret);
+    console.log(`🎯 Processing webhook event: ${event.type} at ${new Date().toISOString()}`);
+
+    // Unified function to handle subscription updates
+    async function updateSubscription(
+      userId: string,
+      planType: 'monthly' | 'semiannual' | 'annual',
+      status: 'active' | 'past_due' | 'cancelled',
+      stripeSubscriptionId: string | null,
+      stripeCustomerId: string,
+      periodStart: string,
+      periodEnd: string
+    ) {
+      const { error } = await supabase.rpc('handle_subscription_webhook', {
+        p_user_id: userId,
+        p_plan_type: planType,
+        p_status: status,
+        p_stripe_subscription_id: stripeSubscriptionId,
+        p_stripe_customer_id: stripeCustomerId,
+        p_period_start: periodStart,
+        p_period_end: periodEnd
+      });
+
+      if (error) console.error('❌ Error updating subscription:', error);
+      else console.log(`✅ Subscription updated successfully for user ${userId}, status: ${status}`);
+    }
+
     switch (event.type) {
-      /** Checkout completed: create subscription */
-      case "checkout.session.completed": {
+      case 'checkout.session.completed': {
         const session = event.data.object as Stripe.Checkout.Session;
-
-        if (session.subscription && session.metadata?.user_id) {
-          const subscription = await stripe.subscriptions.retrieve(
-            session.subscription as string
-          );
-
-          const { error } = await supabase.rpc("handle_subscription_webhook", {
-            p_user_id: session.metadata.user_id,
-            p_plan_type: (session.metadata.plan_type || "monthly") as
-              | "monthly"
-              | "semiannual"
-              | "annual",
-            p_status: "active",
-            p_stripe_subscription_id: subscription.id,
-            p_stripe_customer_id: subscription.customer as string,
-            p_period_start: new Date(
-              subscription.current_period_start * 1000
-            ).toISOString(),
-            p_period_end: new Date(
-              subscription.current_period_end * 1000
-            ).toISOString(),
-          });
-
-          if (error) console.error("❌ Error creating subscription:", error);
-          else console.log("✅ Subscription created via checkout");
-        }
-        break;
-      }
-
-      /** Invoice succeeded: keep subscription dates in sync */
-      case "invoice.payment_succeeded": {
-        const invoice = event.data.object as Stripe.Invoice;
-        if (!invoice.subscription) break;
-
-        const subscription = await stripe.subscriptions.retrieve(
-          invoice.subscription as string
-        );
-
-        // Use metadata if available, fallback to DB lookup
-        let userId = invoice.metadata?.user_id || null;
-        let planType = invoice.metadata?.plan_type || null;
-
-        if (!userId || !planType) {
-          const { data } = await supabase
-            .from("subscriptions")
-            .select("user_id, plan_type")
-            .eq("stripe_customer_id", invoice.customer as string)
-            .maybeSingle();
-
-          if (data) {
-            userId = data.user_id;
-            planType = data.plan_type;
-          }
-        }
+        const userId = session.metadata?.user_id;
+        const planType = session.metadata?.plan_type as 'monthly' | 'semiannual' | 'annual';
 
         if (userId && planType) {
-          const { error } = await supabase.rpc("handle_subscription_webhook", {
-            p_user_id: userId,
-            p_plan_type: planType as "monthly" | "semiannual" | "annual",
-            p_status: "active",
-            p_stripe_subscription_id: subscription.id,
-            p_stripe_customer_id: subscription.customer as string,
-            p_period_start: new Date(
-              subscription.current_period_start * 1000
-            ).toISOString(),
-            p_period_end: new Date(
-              subscription.current_period_end * 1000
-            ).toISOString(),
-          });
+          const periodStart = new Date().toISOString();
+          const periodEnd = calculatePeriodEnd(periodStart, planType);
 
-          if (error)
-            console.error("❌ Error updating subscription via invoice:", error);
-          else console.log("✅ Subscription updated via invoice");
+          await updateSubscription(
+            userId,
+            planType,
+            'active',
+            session.subscription as string || null,
+            session.customer as string,
+            periodStart,
+            periodEnd
+          );
+        } else {
+          console.warn('⚠️ Missing metadata in checkout session:', session.metadata);
         }
         break;
       }
 
-      /** Invoice failed: mark subscription as past_due */
-      case "invoice.payment_failed": {
-        const invoice = event.data.object as Stripe.Invoice;
-        if (!invoice.subscription) break;
+      case 'payment_intent.succeeded': {
+        const paymentIntent = event.data.object as Stripe.PaymentIntent;
+        const userId = paymentIntent.metadata?.user_id;
+        const planType = paymentIntent.metadata?.plan_type as 'monthly' | 'semiannual' | 'annual';
 
-        const subscription = await stripe.subscriptions.retrieve(
-          invoice.subscription as string
-        );
+        if (userId && planType) {
+          const periodStart = new Date().toISOString();
+          const periodEnd = calculatePeriodEnd(periodStart, planType);
 
-        const { error } = await supabase.rpc("handle_subscription_webhook", {
-          p_user_id: invoice.metadata?.user_id,
-          p_plan_type: invoice.metadata?.plan_type as
-            | "monthly"
-            | "semiannual"
-            | "annual",
-          p_status: "past_due",
-          p_stripe_subscription_id: subscription.id,
-          p_stripe_customer_id: subscription.customer as string,
-          p_period_start: new Date(
-            subscription.current_period_start * 1000
-          ).toISOString(),
-          p_period_end: new Date(
-            subscription.current_period_end * 1000
-          ).toISOString(),
-        });
-
-        if (error)
-          console.error("❌ Error marking subscription past_due:", error);
-        else console.log("⚠️ Subscription marked past_due");
+          await updateSubscription(
+            userId,
+            planType,
+            'active',
+            null,
+            paymentIntent.customer as string,
+            periodStart,
+            periodEnd
+          );
+        } else {
+          console.warn('⚠️ Missing metadata in payment intent:', paymentIntent.metadata);
+        }
         break;
       }
 
-      /** Subscription canceled */
-      case "customer.subscription.deleted": {
+      case 'invoice.payment_succeeded': {
+        const invoice = event.data.object as Stripe.Invoice;
+        if (invoice.subscription) {
+          try {
+            const subscription = await stripe.subscriptions.retrieve(invoice.subscription as string);
+            const userId = subscription.metadata?.user_id;
+            const planType = (subscription.metadata?.plan_type || 'monthly') as 'monthly' | 'semiannual' | 'annual';
+            if (userId) {
+              const periodStart = new Date(subscription.current_period_start * 1000).toISOString();
+              const periodEnd = new Date(subscription.current_period_end * 1000).toISOString();
+              await updateSubscription(userId, planType, 'active', subscription.id, subscription.customer as string, periodStart, periodEnd);
+            }
+          } catch (err) {
+            console.error('❌ Error retrieving subscription for invoice:', err);
+          }
+        }
+        break;
+      }
+
+      case 'invoice.payment_failed': {
+        const invoice = event.data.object as Stripe.Invoice;
+        if (invoice.subscription) {
+          try {
+            const subscription = await stripe.subscriptions.retrieve(invoice.subscription as string);
+            const userId = subscription.metadata?.user_id;
+            const planType = (subscription.metadata?.plan_type || 'monthly') as 'monthly' | 'semiannual' | 'annual';
+            if (userId) {
+              const periodStart = new Date(subscription.current_period_start * 1000).toISOString();
+              const periodEnd = new Date(subscription.current_period_end * 1000).toISOString();
+              await updateSubscription(userId, planType, 'past_due', subscription.id, subscription.customer as string, periodStart, periodEnd);
+            }
+          } catch (err) {
+            console.error('❌ Error retrieving subscription for failed invoice:', err);
+          }
+        }
+        break;
+      }
+
+      case 'customer.subscription.deleted': {
         const subscription = event.data.object as Stripe.Subscription;
-
-        const { error } = await supabase.rpc("handle_subscription_webhook", {
-          p_user_id: subscription.metadata?.user_id,
-          p_plan_type: subscription.metadata?.plan_type as
-            | "monthly"
-            | "semiannual"
-            | "annual",
-          p_status: "canceled",
-          p_stripe_subscription_id: subscription.id,
-          p_stripe_customer_id: subscription.customer as string,
-          p_period_start: new Date(
-            subscription.current_period_start * 1000
-          ).toISOString(),
-          p_period_end: new Date(
-            subscription.current_period_end * 1000
-          ).toISOString(),
-        });
-
-        if (error)
-          console.error("❌ Error canceling subscription:", error);
-        else console.log("🛑 Subscription canceled");
+        const userId = subscription.metadata?.user_id;
+        const planType = (subscription.metadata?.plan_type || 'monthly') as 'monthly' | 'semiannual' | 'annual';
+        if (userId) {
+          const periodStart = new Date(subscription.current_period_start * 1000).toISOString();
+          const periodEnd = new Date(subscription.current_period_end * 1000).toISOString();
+          await updateSubscription(userId, planType, 'cancelled', subscription.id, subscription.customer as string, periodStart, periodEnd);
+        }
         break;
       }
 
       default:
-        console.log(`Unhandled event type: ${event.type}`);
+        console.log(`ℹ️ Unhandled webhook event type: ${event.type}`);
     }
 
-    return new Response(JSON.stringify({ received: true }), {
+    return new Response(JSON.stringify({
+      received: true,
+      processed: true,
+      event_type: event.type,
+      timestamp: new Date().toISOString()
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       status: 200,
-      headers: corsHeaders,
     });
-  } catch (err) {
-    console.error("❌ Webhook error:", err);
-    return new Response("Webhook handler error", { status: 500 });
+  } catch (error) {
+    console.error('💥 Webhook processing error:', error);
+    return new Response(JSON.stringify({
+      error: (error as any)?.message || 'unknown error',
+      event_type: 'unknown',
+      timestamp: new Date().toISOString()
+    }), {
+      status: 400,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
   }
 });
+ 
