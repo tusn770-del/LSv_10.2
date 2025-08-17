@@ -7,7 +7,7 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, stripe-signature",
 };
 
-// Helper function to calculate period_end based on plan type
+// Helper to calculate period_end based on plan type
 function calculatePeriodEnd(start: string, planType: 'monthly' | 'semiannual' | 'annual') {
   const date = new Date(start);
   switch (planType) {
@@ -42,21 +42,14 @@ Deno.serve(async (req: Request) => {
     const signature = req.headers.get('stripe-signature');
     const body = await req.text();
 
-    if (!signature) {
-      console.error('❌ No Stripe signature found');
-      return new Response('No signature', { status: 400 });
-    }
+    if (!signature) return new Response('No signature', { status: 400 });
 
     const webhookSecret = Deno.env.get('STRIPE_WEBHOOK_SECRET');
-    if (!webhookSecret) {
-      console.error('❌ No webhook secret configured');
-      return new Response('Webhook secret not configured', { status: 500 });
-    }
+    if (!webhookSecret) return new Response('Webhook secret not configured', { status: 500 });
 
     const event = await stripe.webhooks.constructEventAsync(body, signature, webhookSecret);
-    console.log(`🎯 Processing webhook event: ${event.type} at ${new Date().toISOString()}`);
+    console.log(`Processing webhook event: ${event.type} at ${new Date().toISOString()}`);
 
-    // Unified function to handle subscription updates
     async function updateSubscription(
       userId: string,
       planType: 'monthly' | 'semiannual' | 'annual',
@@ -76,8 +69,8 @@ Deno.serve(async (req: Request) => {
         p_period_end: periodEnd
       });
 
-      if (error) console.error('❌ Error updating subscription:', error);
-      else console.log(`✅ Subscription updated successfully for user ${userId}, status: ${status}`);
+      console.log('Supabase RPC response:', { error });
+      if (error) throw new Error('Subscription update failed');
     }
 
     switch (event.type) {
@@ -85,23 +78,11 @@ Deno.serve(async (req: Request) => {
         const session = event.data.object as Stripe.Checkout.Session;
         const userId = session.metadata?.user_id;
         const planType = session.metadata?.plan_type as 'monthly' | 'semiannual' | 'annual';
-
         if (userId && planType) {
           const periodStart = new Date().toISOString();
           const periodEnd = calculatePeriodEnd(periodStart, planType);
-
-          await updateSubscription(
-            userId,
-            planType,
-            'active',
-            session.subscription as string || null,
-            session.customer as string,
-            periodStart,
-            periodEnd
-          );
-        } else {
-          console.warn('⚠️ Missing metadata in checkout session:', session.metadata);
-        }
+          await updateSubscription(userId, planType, 'active', session.subscription as string || null, session.customer as string, periodStart, periodEnd);
+        } else console.warn('Missing metadata in checkout session:', session.metadata);
         break;
       }
 
@@ -109,99 +90,53 @@ Deno.serve(async (req: Request) => {
         const paymentIntent = event.data.object as Stripe.PaymentIntent;
         const userId = paymentIntent.metadata?.user_id;
         const planType = paymentIntent.metadata?.plan_type as 'monthly' | 'semiannual' | 'annual';
-
         if (userId && planType) {
           const periodStart = new Date().toISOString();
           const periodEnd = calculatePeriodEnd(periodStart, planType);
-
-          await updateSubscription(
-            userId,
-            planType,
-            'active',
-            null,
-            paymentIntent.customer as string,
-            periodStart,
-            periodEnd
-          );
-        } else {
-          console.warn('⚠️ Missing metadata in payment intent:', paymentIntent.metadata);
-        }
+          await updateSubscription(userId, planType, 'active', null, paymentIntent.customer as string, periodStart, periodEnd);
+        } else console.warn('Missing metadata in payment intent:', paymentIntent.metadata);
         break;
       }
 
-      case 'invoice.payment_succeeded': {
-        const invoice = event.data.object as Stripe.Invoice;
-        if (invoice.subscription) {
-          try {
-            const subscription = await stripe.subscriptions.retrieve(invoice.subscription as string);
-            const userId = subscription.metadata?.user_id;
-            const planType = (subscription.metadata?.plan_type || 'monthly') as 'monthly' | 'semiannual' | 'annual';
-            if (userId) {
-              const periodStart = new Date(subscription.current_period_start * 1000).toISOString();
-              const periodEnd = new Date(subscription.current_period_end * 1000).toISOString();
-              await updateSubscription(userId, planType, 'active', subscription.id, subscription.customer as string, periodStart, periodEnd);
-            }
-          } catch (err) {
-            console.error('❌ Error retrieving subscription for invoice:', err);
-          }
-        }
-        break;
-      }
-
-      case 'invoice.payment_failed': {
-        const invoice = event.data.object as Stripe.Invoice;
-        if (invoice.subscription) {
-          try {
-            const subscription = await stripe.subscriptions.retrieve(invoice.subscription as string);
-            const userId = subscription.metadata?.user_id;
-            const planType = (subscription.metadata?.plan_type || 'monthly') as 'monthly' | 'semiannual' | 'annual';
-            if (userId) {
-              const periodStart = new Date(subscription.current_period_start * 1000).toISOString();
-              const periodEnd = new Date(subscription.current_period_end * 1000).toISOString();
-              await updateSubscription(userId, planType, 'past_due', subscription.id, subscription.customer as string, periodStart, periodEnd);
-            }
-          } catch (err) {
-            console.error('❌ Error retrieving subscription for failed invoice:', err);
-          }
-        }
-        break;
-      }
-
+      case 'invoice.payment_succeeded':
+      case 'invoice.payment_failed':
       case 'customer.subscription.deleted': {
-        const subscription = event.data.object as Stripe.Subscription;
-        const userId = subscription.metadata?.user_id;
-        const planType = (subscription.metadata?.plan_type || 'monthly') as 'monthly' | 'semiannual' | 'annual';
-        if (userId) {
+        const invoiceOrSub = event.data.object as any;
+        let subscription: Stripe.Subscription | null = null;
+
+        if (event.type.startsWith('invoice') && invoiceOrSub.subscription) {
+          subscription = await stripe.subscriptions.retrieve(invoiceOrSub.subscription as string);
+        } else if (event.type === 'customer.subscription.deleted') {
+          subscription = invoiceOrSub as Stripe.Subscription;
+        }
+
+        if (subscription?.metadata?.user_id) {
+          const userId = subscription.metadata.user_id;
+          const planType = (subscription.metadata.plan_type || 'monthly') as 'monthly' | 'semiannual' | 'annual';
           const periodStart = new Date(subscription.current_period_start * 1000).toISOString();
           const periodEnd = new Date(subscription.current_period_end * 1000).toISOString();
-          await updateSubscription(userId, planType, 'cancelled', subscription.id, subscription.customer as string, periodStart, periodEnd);
+          const status = event.type === 'invoice.payment_failed' ? 'past_due' :
+                         event.type === 'customer.subscription.deleted' ? 'cancelled' : 'active';
+
+          await updateSubscription(userId, planType, status, subscription.id, subscription.customer as string, periodStart, periodEnd);
         }
         break;
       }
 
       default:
-        console.log(`ℹ️ Unhandled webhook event type: ${event.type}`);
+        console.log(`Unhandled webhook event type: ${event.type}`);
     }
 
-    return new Response(JSON.stringify({
-      received: true,
-      processed: true,
-      event_type: event.type,
-      timestamp: new Date().toISOString()
-    }), {
+    return new Response(JSON.stringify({ received: true, event_type: event.type }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       status: 200,
     });
+
   } catch (error) {
-    console.error('💥 Webhook processing error:', error);
-    return new Response(JSON.stringify({
-      error: (error as any)?.message || 'unknown error',
-      event_type: 'unknown',
-      timestamp: new Date().toISOString()
-    }), {
+    console.error('Webhook processing error:', error);
+    return new Response(JSON.stringify({ error: (error as any)?.message || 'unknown error' }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       status: 400,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   }
 });
- 
